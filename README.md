@@ -263,6 +263,25 @@ stderr.
 - Every reconnect appears in your Ring event history as an `on_demand` event.
 - Audio is resampled to 16 kHz mono AAC, which is what Frigate's audio detection expects.
 
+## Known advisory: `ip` (GHSA-2p57-rm9w-gvfp)
+
+`npm audit` reports a high-severity SSRF advisory against the `ip` package. It arrives
+transitively as `ring-client-api → werift → ip`, and there is no patched version — the
+package is unmaintained, and the only `npm audit fix` is a downgrade to
+`ring-client-api@9.13.0`, which is a breaking change.
+
+The advisory is specifically about `ip.isPublic()` misclassifying addresses. That
+function is never called anywhere in this dependency tree; werift uses only
+`ip.toString`, `ip.toBuffer`, `ip.isV4Format` and `ip.isLoopback`, for STUN attribute
+encoding and ICE candidate handling. Verify it yourself:
+
+```sh
+grep -rn "\.isPublic(" node_modules/werift node_modules/ring-client-api   # no hits
+```
+
+So the alert stays open until upstream drops the dependency, but the vulnerable code path
+is not reachable from here.
+
 ## How it works
 
 ```
