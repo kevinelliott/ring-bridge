@@ -1,0 +1,19 @@
+{
+  "name": "ring",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx --env-file-if-exists=.env ring.ts",
+    "typecheck": "tsc --noEmit",
+    "bridge": "tsx --env-file-if-exists=.env frigate-bridge.ts"
+  },
+  "dependencies": {
+    "ring-client-api": "^14.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}
