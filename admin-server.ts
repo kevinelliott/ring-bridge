@@ -116,22 +116,44 @@ export class AdminServer {
     }
   }
 
+  private matchesToken(provided: string): boolean {
+    const a = Buffer.from(provided)
+    const b = Buffer.from(this.token ?? '')
+    // timingSafeEqual requires equal lengths, so compare those first.
+    return a.length === b.length && timingSafeEqual(a, b)
+  }
+
   /**
-   * Mutating routes require the token when one is configured. Comparison is
-   * constant-time so a wrong token cannot be discovered by timing.
+   * Authorise a request when a token is configured.
+   *
+   * The token is never accepted from the query string: URLs end up in server
+   * logs, proxy logs and browser history, which is exactly where a long-lived
+   * credential should not be.
+   *
+   * Reads may authenticate with a cookie because EventSource cannot set
+   * request headers. Mutations require the header, which a cross-site request
+   * cannot add -- so cookie auth alone can never be replayed as CSRF.
    */
-  private authorized(req: IncomingMessage): boolean {
+  private authorized(req: IncomingMessage, allowCookie: boolean): boolean {
     if (!this.token) {
       return true
     }
-    const url = new URL(req.url ?? '/', 'http://localhost')
-    const provided =
-      req.headers['x-admin-token']?.toString() ??
-      url.searchParams.get('token') ??
-      ''
-    const a = Buffer.from(provided)
-    const b = Buffer.from(this.token)
-    return a.length === b.length && timingSafeEqual(a, b)
+
+    const header = req.headers['x-admin-token']?.toString()
+    if (header && this.matchesToken(header)) {
+      return true
+    }
+
+    if (allowCookie) {
+      const cookie = /(?:^|;\s*)admin_token=([^;]+)/.exec(
+        req.headers.cookie ?? '',
+      )?.[1]
+      if (cookie && this.matchesToken(decodeURIComponent(cookie))) {
+        return true
+      }
+    }
+
+    return false
   }
 
   private json(res: ServerResponse, status: number, body: unknown): void {
@@ -148,6 +170,11 @@ export class AdminServer {
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname
 
+    if (path === '/api/auth') {
+      this.json(res, 200, { authRequired: Boolean(this.token) })
+      return
+    }
+
     if (path === '/' || path === '/index.html') {
       // Cached after first read; the page is static.
       this.uiCache ??= await readFile(UI_PATH, 'utf8')
@@ -156,6 +183,13 @@ export class AdminServer {
         'cache-control': 'no-store',
       })
       res.end(this.uiCache)
+      return
+    }
+
+    // The page itself stays open: it is an empty shell that renders the token
+    // prompt. Everything that returns data is gated.
+    if (path.startsWith('/api/') && !this.authorized(req, req.method === 'GET')) {
+      this.json(res, 401, { error: 'admin token required' })
       return
     }
 
@@ -191,7 +225,8 @@ export class AdminServer {
       }
 
       if (req.method === 'POST') {
-        if (!this.authorized(req)) {
+        // Header only: see authorized().
+        if (!this.authorized(req, false)) {
           this.json(res, 401, { error: 'invalid or missing admin token' })
           return
         }

@@ -119,6 +119,15 @@
 </nav>
 
 <main>
+  <div class="note" id="lockBanner" style="display:none; border-left-color: var(--err); max-width:620px">
+    This bridge requires an admin token. Enter it to load data:
+    <div style="display:flex; gap:8px; margin-top:10px">
+      <input id="lockToken" type="password" placeholder="admin token" style="flex:1">
+      <button class="btn primary" id="lockGo">Unlock</button>
+    </div>
+    <div id="lockMsg" style="margin-top:8px"></div>
+  </div>
+
   <section id="dash" class="active">
     <div class="cams" id="cams"></div>
   </section>
@@ -177,6 +186,24 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+
+/* The token rides in a cookie so EventSource (which cannot set headers) can
+   authenticate. Mutations additionally send it as a header, which cross-site
+   requests cannot forge — so the cookie alone is never enough to change config. */
+let adminToken = '';
+function setToken(t) {
+  adminToken = t;
+  document.cookie = `admin_token=${encodeURIComponent(t)}; Path=/; SameSite=Strict; Max-Age=604800`;
+}
+function authHeaders() {
+  return adminToken ? { 'x-admin-token': adminToken } : {};
+}
+async function api(path, init = {}) {
+  const r = await fetch(path, { ...init, headers: { ...(init.headers || {}), ...authHeaders() } });
+  if (r.status === 401) { showLock(); throw new Error('unauthorized'); }
+  return r;
+}
+function showLock() { $('lockBanner').style.display = 'block'; }
 const fmtTime = (ms) => new Date(ms).toLocaleTimeString();
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
@@ -306,7 +333,7 @@ function renderEvents() {
 async function loadEvents(refresh) {
   $('evRefresh').disabled = true;
   try {
-    const r = await fetch('/api/events' + (refresh ? '?refresh=1' : ''));
+    const r = await api('/api/events' + (refresh ? '?refresh=1' : ''));
     const d = await r.json();
     allEvents = d.events;
     const names = [...new Set(allEvents.map((e) => e.cameraName))];
@@ -356,7 +383,7 @@ $('logClear').onclick = () => { logLines = []; logEl.innerHTML = ''; };
 
 /* ---------- config ---------- */
 async function loadConfig() {
-  const d = await (await fetch('/api/config')).json();
+  const d = await (await api('/api/config')).json();
   const c = d.config;
   $('cfgSize').value = `${c.width}x${c.height}`;
   $('cfgFps').value = c.fps;
@@ -367,6 +394,8 @@ async function loadConfig() {
   if (d.authRequired) {
     $('authNote').style.display = 'block';
     $('tokenRow').style.display = 'grid';
+    $('cfgToken').value = adminToken;
+    $('cfgToken').oninput = () => setToken($('cfgToken').value);
   }
 }
 $('cfgSave').onclick = async () => {
@@ -385,9 +414,10 @@ $('cfgSave').onclick = async () => {
   msg.textContent = 'Applying…'; msg.style.color = 'var(--muted)';
   const r = await fetch('/api/config', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-admin-token': $('cfgToken').value },
+    headers: { 'content-type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
   });
+  if (r.status === 401) { showLock(); msg.textContent = 'Admin token required'; msg.style.color = 'var(--err)'; return; }
   const d = await r.json();
   if (!r.ok) { msg.textContent = d.error; msg.style.color = 'var(--err)'; return; }
   msg.style.color = 'var(--ok)';
@@ -422,13 +452,39 @@ function connect() {
   };
 }
 
-(async function init() {
-  const logs = await (await fetch('/api/logs')).json();
+$('lockGo').onclick = async () => {
+  setToken($('lockToken').value);
+  $('lockMsg').textContent = 'Checking…';
+  $('lockMsg').style.color = 'var(--muted)';
+  try {
+    await api('/api/status');
+    $('lockBanner').style.display = 'none';
+    await boot();
+  } catch {
+    $('lockMsg').textContent = 'Rejected — check the token.';
+    $('lockMsg').style.color = 'var(--err)';
+  }
+};
+
+async function boot() {
+  const logs = await (await api('/api/logs')).json();
   logLines = logs;
   redrawLogs();
   await loadEvents(false);
   await loadConfig();
   connect();
+}
+
+(async function init() {
+  // Reuse a cookie from a previous visit if one is still valid.
+  adminToken = decodeURIComponent(
+    /(?:^|;\s*)admin_token=([^;]+)/.exec(document.cookie)?.[1] ?? '');
+  const { authRequired } = await (await fetch('/api/auth')).json();
+  try {
+    await boot();
+  } catch {
+    if (authRequired) showLock();
+  }
 })();
 </script>
 </body>

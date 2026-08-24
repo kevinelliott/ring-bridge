@@ -143,14 +143,22 @@ dials Ring it creates one — they are mostly the bridge's own activity, not rea
 
 ### Securing the dashboard
 
-The dashboard binds to `0.0.0.0` and **read access is unauthenticated** — anyone who can
-reach the port can watch previews, logs, and events. Options:
+By default the dashboard binds to `0.0.0.0` with **no authentication**, so anyone who can
+reach the port can view camera snapshots, logs, and events, and change encoder settings.
+The bridge prints a warning at startup when that is the case. Pick one:
 
 ```sh
-npm run bridge -- --web-token "some-secret"   # require a token for changes
+npm run bridge -- --web-token "some-secret"   # require a token for everything
 npm run bridge -- --web-bind 127.0.0.1        # local only, reach it over SSH
 npm run bridge -- --no-web                    # turn it off entirely
 ```
+
+With `--web-token` set, **every endpoint** is gated — snapshots and logs included, not
+just configuration. The browser stores the token in a `SameSite=Strict` cookie so that
+live updates work (`EventSource` cannot send custom headers), but configuration changes
+additionally require the token as an `X-Admin-Token` header, which a cross-site request
+cannot forge. The token is never accepted from the query string, since URLs end up in
+server logs and browser history.
 
 There is no TLS. Put it behind a reverse proxy if it needs to leave your LAN.
 

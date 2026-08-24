@@ -486,8 +486,15 @@ if (options.webPort > 0) {
   await admin.listen(options.webPort, options.webBind)
   console.log(
     `Admin dashboard on http://${options.webBind}:${options.webPort}` +
-      (options.webToken ? ' (token required for changes)' : ''),
+      (options.webToken ? ' (token required)' : ''),
   )
+  if (!options.webToken && options.webBind !== '127.0.0.1' && options.webBind !== 'localhost') {
+    console.warn(
+      '[admin] WARNING: dashboard is reachable on the network with no token. ' +
+        'Anyone who can reach this port can view camera snapshots, logs and events, ' +
+        'and change encoder settings. Use --web-token, --web-bind 127.0.0.1, or --no-web.',
+    )
+  }
 }
 
 let stopping = false
