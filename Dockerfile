@@ -25,5 +25,7 @@ VOLUME ["/config"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s \
   CMD node -e "fetch('http://127.0.0.1:8080/api/auth').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-ENTRYPOINT ["npx", "tsx", "cli.ts"]
+# Invoke the installed binary directly: npx would reach for the network if the
+# package were ever missing, and this image must start without one.
+ENTRYPOINT ["node_modules/.bin/tsx", "cli.ts"]
 CMD ["run", "--config", "/config/ring-bridge.config.json"]

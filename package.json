@@ -13,11 +13,11 @@
   },
   "dependencies": {
     "mqtt": "^5.15.2",
-    "ring-client-api": "^14.3.0"
+    "ring-client-api": "^14.3.0",
+    "tsx": "^4.23.12"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
-    "tsx": "^4.23.12",
     "typescript": "^7.0.2"
   },
   "description": "Serve Ring cameras as RTSP for Frigate and other NVRs",
