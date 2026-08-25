@@ -64,6 +64,9 @@ export class PublishedStream {
   readonly path: string
   readonly tracks: Track[] = []
   private readonly sessions = new Set<Session>()
+  private readonly clientListeners = new Set<(count: number) => void>()
+  /** Bytes fanned out, for the dashboard's measured-bitrate figure. */
+  bytesSent = 0
   /** SPS/PPS sniffed from the live RTP, advertised so clients decode on join. */
   private sps?: Buffer
   private pps?: Buffer
@@ -231,6 +234,7 @@ export class PublishedStream {
           continue
         }
 
+        this.bytesSent += packet.length
         if (transport.kind === 'tcp') {
           const header = Buffer.allocUnsafe(4)
           header[0] = 0x24 // '$'
@@ -285,10 +289,24 @@ export class PublishedStream {
 
   addSession(session: Session): void {
     this.sessions.add(session)
+    this.notifyClients()
   }
 
   removeSession(session: Session): void {
-    this.sessions.delete(session)
+    if (this.sessions.delete(session)) {
+      this.notifyClients()
+    }
+  }
+
+  onClientChange(listener: (count: number) => void): () => void {
+    this.clientListeners.add(listener)
+    return () => this.clientListeners.delete(listener)
+  }
+
+  private notifyClients(): void {
+    for (const listener of this.clientListeners) {
+      listener(this.sessions.size)
+    }
   }
 
   get clientCount(): number {
@@ -312,12 +330,17 @@ export class RtspServer {
   private server?: Server
 
   /** Per-path client counts, for the admin dashboard. */
-  streamInfo(): Array<{ path: string; clients: number; tracks: number }> {
+  streamInfo(): Array<{ path: string; clients: number; tracks: number; bytesSent: number }> {
     return [...this.streams.values()].map((stream) => ({
       path: stream.path,
       clients: stream.clientCount,
       tracks: stream.tracks.length,
+      bytesSent: stream.bytesSent,
     }))
+  }
+
+  stream(path: string): PublishedStream | undefined {
+    return this.streams.get(path)
   }
 
   publish(path: string): PublishedStream {
