@@ -8,31 +8,47 @@
  * its own without any client-side plumbing.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { randomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { timingSafeEqual } from 'node:crypto'
 import { logBus, type LogEntry } from './log-bus.ts'
 import type { RingEventCollector, RingEventRecord } from './ring-events.ts'
-import type { TunableOptions } from './continuous-publisher.ts'
+import type { ContinuousPublisher, OutputStats } from './continuous-publisher.ts'
+import type { BridgeConfig, CameraSettings } from './config.ts'
+import { renderMetrics } from './metrics.ts'
 
 const projectRoot = dirname(fileURLToPath(import.meta.url))
 const UI_PATH = join(projectRoot, 'public', 'index.html')
+/** Preview frame rate; low enough to stay cheap, high enough to look live. */
+const MJPEG_FPS = 5
+
+export interface OutputStatus extends OutputStats {
+  path: string
+  clients: number
+  bytesSent: number
+}
 
 export interface CameraStatus {
   name: string
   path: string
-  rtspUrl: string
   live: boolean
+  connected: boolean
+  demandReason: string
+  pinned: boolean
+  alwaysOn: boolean
+  onDemand: boolean
   lastFrameAt: number
   droppedFrames: number
   encoderRestarts: number
-  clients: number
-  hasAudio: boolean
-  audioBufferedMs: number
   peakQueuedFrames: number
-  settings: TunableOptions
+  audioBufferedMs: number
+  clients: number
+  bytesSent: number
+  outputs: OutputStatus[]
 }
 
 export interface BridgeStatus {
@@ -40,19 +56,30 @@ export interface BridgeStatus {
   rtspPort: number
   cameras: CameraStatus[]
   events: { lastRefreshAt: number; error?: string; count: number }
+  mqtt: { enabled: boolean; connected: boolean; error?: string }
+}
+
+export interface ApplyResult {
+  applied?: string[]
+  configPath?: string
+  error?: string
 }
 
 export interface AdminContext {
   getStatus(): BridgeStatus
-  getConfig(): TunableOptions & { audio: boolean; port: number }
-  applyConfig(patch: Partial<TunableOptions>): { applied: string[]; restartRequired: string[] }
-  getSnapshot(path: string): Promise<Buffer | undefined>
+  getConfig(): BridgeConfig
+  /** `cameraName` null applies to defaults (all cameras). */
+  applyConfig(cameraName: string | null, patch: Partial<CameraSettings>): ApplyResult
+  pinCamera(path: string, seconds: number): boolean
+  getPublisher(path: string): ContinuousPublisher | undefined
+  getRuntime(path: string): { camera: { name: string }; session?: unknown } | undefined
+  /** Play audio through a camera's speaker; resolves when playback finishes. */
+  talk(path: string, audioPath: string): Promise<{ error?: string }>
   events: RingEventCollector
   refreshEvents(): Promise<void>
 }
 
 interface SseClient {
-  id: number
   res: ServerResponse
 }
 
@@ -61,8 +88,9 @@ export class AdminServer {
   private readonly token?: string
   private readonly clients = new Set<SseClient>()
   private server?: ReturnType<typeof createServer>
-  private nextClientId = 1
   private uiCache?: string
+  /** One shared JPEG encoder per camera, alive while viewers are watching. */
+  private readonly mjpeg = new Map<string, MjpegSession>()
 
   constructor(context: AdminContext, token?: string) {
     this.context = context
@@ -72,7 +100,9 @@ export class AdminServer {
   async listen(port: number, host: string): Promise<void> {
     const server = createServer((req, res) => {
       this.handle(req, res).catch((error) => {
-        this.json(res, 500, { error: String(error) })
+        if (!res.headersSent) {
+          this.json(res, 500, { error: String(error) })
+        }
       })
     })
     this.server = server
@@ -85,7 +115,6 @@ export class AdminServer {
       })
     })
 
-    // Push log lines and Ring events to every connected dashboard.
     logBus.subscribe((entry) => this.broadcast('log', entry))
     this.context.events.subscribe((event) => this.broadcast('ring-event', event))
 
@@ -103,10 +132,14 @@ export class AdminServer {
       client.res.end()
     }
     this.clients.clear()
+    for (const session of this.mjpeg.values()) {
+      session.close()
+    }
+    this.mjpeg.clear()
     this.server?.close()
   }
 
-  private broadcast(event: string, data: LogEntry | RingEventRecord | BridgeStatus): void {
+  private broadcast(event: string, data: unknown): void {
     if (this.clients.size === 0) {
       return
     }
@@ -130,29 +163,24 @@ export class AdminServer {
    * logs, proxy logs and browser history, which is exactly where a long-lived
    * credential should not be.
    *
-   * Reads may authenticate with a cookie because EventSource cannot set
-   * request headers. Mutations require the header, which a cross-site request
-   * cannot add -- so cookie auth alone can never be replayed as CSRF.
+   * Reads may authenticate with a cookie because EventSource and <img> cannot
+   * set request headers. Mutations require the header, which a cross-site
+   * request cannot add -- so cookie auth alone can never be replayed as CSRF.
    */
   private authorized(req: IncomingMessage, allowCookie: boolean): boolean {
     if (!this.token) {
       return true
     }
-
     const header = req.headers['x-admin-token']?.toString()
     if (header && this.matchesToken(header)) {
       return true
     }
-
     if (allowCookie) {
-      const cookie = /(?:^|;\s*)admin_token=([^;]+)/.exec(
-        req.headers.cookie ?? '',
-      )?.[1]
+      const cookie = /(?:^|;\s*)admin_token=([^;]+)/.exec(req.headers.cookie ?? '')?.[1]
       if (cookie && this.matchesToken(decodeURIComponent(cookie))) {
         return true
       }
     }
-
     return false
   }
 
@@ -176,7 +204,6 @@ export class AdminServer {
     }
 
     if (path === '/' || path === '/index.html') {
-      // Cached after first read; the page is static.
       this.uiCache ??= await readFile(UI_PATH, 'utf8')
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',
@@ -186,10 +213,20 @@ export class AdminServer {
       return
     }
 
-    // The page itself stays open: it is an empty shell that renders the token
-    // prompt. Everything that returns data is gated.
-    if (path.startsWith('/api/') && !this.authorized(req, req.method === 'GET')) {
+    const isRead = req.method === 'GET'
+    if ((path.startsWith('/api/') || path === '/metrics') &&
+        !this.authorized(req, isRead)) {
       this.json(res, 401, { error: 'admin token required' })
+      return
+    }
+
+    if (path === '/metrics') {
+      const body = renderMetrics(this.context.getStatus())
+      res.writeHead(200, {
+        'content-type': 'text/plain; version=0.0.4; charset=utf-8',
+        'content-length': Buffer.byteLength(body),
+      })
+      res.end(body)
       return
     }
 
@@ -223,50 +260,104 @@ export class AdminServer {
         })
         return
       }
-
       if (req.method === 'POST') {
         // Header only: see authorized().
         if (!this.authorized(req, false)) {
           this.json(res, 401, { error: 'invalid or missing admin token' })
           return
         }
-        const body = await readBody(req)
-        let patch: Partial<TunableOptions>
+        let body: { camera?: string | null; patch?: Partial<CameraSettings> }
         try {
-          patch = JSON.parse(body || '{}') as Partial<TunableOptions>
+          body = JSON.parse((await readBody(req)) || '{}')
         } catch {
           this.json(res, 400, { error: 'body must be JSON' })
           return
         }
-
-        const invalid = validate(patch)
-        if (invalid) {
-          this.json(res, 400, { error: invalid })
-          return
-        }
-
-        const result = this.context.applyConfig(patch)
-        this.json(res, 200, { ...result, config: this.context.getConfig() })
+        const result = this.context.applyConfig(body.camera ?? null, body.patch ?? {})
+        this.json(res, result.error ? 400 : 200, result)
         return
       }
-
       this.json(res, 405, { error: 'method not allowed' })
+      return
+    }
+
+    if (path.startsWith('/api/pin/')) {
+      if (req.method !== 'POST' || !this.authorized(req, false)) {
+        this.json(res, req.method === 'POST' ? 401 : 405, { error: 'not allowed' })
+        return
+      }
+      const camera = decodeURIComponent(path.slice('/api/pin/'.length))
+      const seconds = Number(url.searchParams.get('seconds') ?? 300)
+      const ok = this.context.pinCamera(camera, Number.isFinite(seconds) ? seconds : 300)
+      this.json(res, ok ? 200 : 404, ok ? { pinned: seconds } : { error: 'unknown camera' })
       return
     }
 
     if (path.startsWith('/api/snapshot/')) {
       const camera = decodeURIComponent(path.slice('/api/snapshot/'.length))
-      const jpeg = await this.context.getSnapshot(camera)
-      if (!jpeg) {
+      const current = this.context.getPublisher(camera)?.currentFrame()
+      if (!current) {
         this.json(res, 404, { error: 'no frame available yet' })
         return
       }
+      const jpeg = await frameToJpeg(current.frame, current.width, current.height)
       res.writeHead(200, {
         'content-type': 'image/jpeg',
         'cache-control': 'no-store',
         'content-length': jpeg.length,
       })
       res.end(jpeg)
+      return
+    }
+
+    if (path.startsWith('/api/talk/')) {
+      // Mutating and physically audible at the camera, so header auth only.
+      if (req.method !== 'POST' || !this.authorized(req, false)) {
+        this.json(res, req.method === 'POST' ? 401 : 405, { error: 'not allowed' })
+        return
+      }
+      const camera = decodeURIComponent(path.slice('/api/talk/'.length))
+      const temp = join(tmpdir(), `ring-talk-${randomBytes(6).toString('hex')}`)
+      try {
+        await writeFile(temp, await readBinaryBody(req))
+        const result = await this.context.talk(camera, temp)
+        this.json(res, result.error ? 400 : 200, result.error ? result : { spoken: true })
+      } catch (error) {
+        this.json(res, 400, { error: String(error) })
+      } finally {
+        await rm(temp, { force: true })
+      }
+      return
+    }
+
+    if (path.startsWith('/api/event-thumb/')) {
+      const rest = path.slice('/api/event-thumb/'.length)
+      const slash = rest.indexOf('/')
+      const cameraName = decodeURIComponent(rest.slice(0, slash))
+      const uuid = decodeURIComponent(rest.slice(slash + 1))
+      const camera = this.context.events.byName.get(cameraName)
+      if (!camera || !/^[\w-]{8,64}$/.test(uuid)) {
+        this.json(res, 404, { error: 'unknown event snapshot' })
+        return
+      }
+      try {
+        const image = await camera.getSnapshotByUuid(uuid)
+        res.writeHead(200, {
+          'content-type': 'image/jpeg',
+          // Event snapshots never change, so let the browser keep them.
+          'cache-control': 'private, max-age=3600',
+          'content-length': image.length,
+        })
+        res.end(image)
+      } catch (error) {
+        this.json(res, 502, { error: `Ring refused the snapshot: ${String(error)}` })
+      }
+      return
+    }
+
+    if (path.startsWith('/api/preview/')) {
+      const camera = decodeURIComponent(path.slice('/api/preview/'.length))
+      this.serveMjpeg(camera, res)
       return
     }
 
@@ -277,20 +368,124 @@ export class AdminServer {
         connection: 'keep-alive',
       })
       res.write('retry: 2000\n\n')
-
-      const client: SseClient = { id: this.nextClientId++, res }
+      const client: SseClient = { res }
       this.clients.add(client)
-
       res.write(`event: status\ndata: ${JSON.stringify(this.context.getStatus())}\n\n`)
-
-      req.on('close', () => {
-        this.clients.delete(client)
-      })
+      req.on('close', () => this.clients.delete(client))
       return
     }
 
     this.json(res, 404, { error: 'not found' })
   }
+
+  /**
+   * Multipart MJPEG, so the dashboard shows motion instead of a still that
+   * refreshes every few seconds. One encoder is shared by all viewers of a
+   * camera and torn down when the last one leaves, so an unwatched dashboard
+   * costs nothing.
+   */
+  private serveMjpeg(cameraPath: string, res: ServerResponse): void {
+    const publisher = this.context.getPublisher(cameraPath)
+    if (!publisher) {
+      this.json(res, 404, { error: 'unknown camera' })
+      return
+    }
+
+    let session = this.mjpeg.get(cameraPath)
+    if (!session) {
+      session = new MjpegSession(publisher, () => this.mjpeg.delete(cameraPath))
+      this.mjpeg.set(cameraPath, session)
+    }
+    session.addViewer(res)
+  }
+}
+
+/** Encodes the publisher's current frame to JPEG for any number of viewers. */
+class MjpegSession {
+  private readonly viewers = new Set<ServerResponse>()
+  private readonly stopFrames: () => void
+  private readonly onEmpty: () => void
+  private encoder?: ReturnType<typeof spawn>
+  private busy = false
+  private lastSentAt = 0
+  private latest?: { frame: Buffer; width: number; height: number }
+
+  constructor(publisher: ContinuousPublisher, onEmpty: () => void) {
+    this.onEmpty = onEmpty
+    this.stopFrames = publisher.onFrame(() => {
+      const current = publisher.currentFrame()
+      if (current) {
+        this.latest = current
+        void this.maybeEncode()
+      }
+    })
+  }
+
+  private async maybeEncode(): Promise<void> {
+    const now = Date.now()
+    if (this.busy || now - this.lastSentAt < 1000 / MJPEG_FPS || !this.latest) {
+      return
+    }
+    this.busy = true
+    this.lastSentAt = now
+    const { frame, width, height } = this.latest
+    try {
+      const jpeg = await frameToJpeg(frame, width, height)
+      for (const viewer of this.viewers) {
+        viewer.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`)
+        viewer.write(jpeg)
+        viewer.write('\r\n')
+      }
+    } catch {
+      // A dropped preview frame is not worth surfacing.
+    } finally {
+      this.busy = false
+    }
+  }
+
+  addViewer(res: ServerResponse): void {
+    res.writeHead(200, {
+      'content-type': 'multipart/x-mixed-replace; boundary=frame',
+      'cache-control': 'no-store',
+      connection: 'close',
+    })
+    this.viewers.add(res)
+    res.on('close', () => {
+      this.viewers.delete(res)
+      if (this.viewers.size === 0) {
+        this.close()
+      }
+    })
+  }
+
+  close(): void {
+    this.stopFrames()
+    this.encoder?.kill('SIGKILL')
+    for (const viewer of this.viewers) {
+      viewer.end()
+    }
+    this.viewers.clear()
+    this.onEmpty()
+  }
+}
+
+/** Audio uploads are larger than config payloads but still bounded. */
+function readBinaryBody(req: IncomingMessage): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let size = 0
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length
+      if (size > 8 * 1024 * 1024) {
+        reject(new Error('audio must be under 8MB'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => resolve(Buffer.concat(chunks)))
+    req.on('error', reject)
+  })
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -312,40 +507,7 @@ function readBody(req: IncomingMessage): Promise<string> {
   })
 }
 
-/** Mirror the CLI's validation so the UI cannot set values the CLI rejects. */
-function validate(patch: Partial<TunableOptions>): string | undefined {
-  if (patch.fps !== undefined && (!Number.isFinite(patch.fps) || patch.fps < 1 || patch.fps > 60)) {
-    return 'fps must be between 1 and 60'
-  }
-  if (
-    patch.crf !== undefined &&
-    (!Number.isInteger(patch.crf) || patch.crf < 0 || patch.crf > 51)
-  ) {
-    return 'crf must be an integer between 0 and 51'
-  }
-  if (
-    patch.bitrateKbps !== undefined &&
-    patch.bitrateKbps !== null &&
-    (!Number.isFinite(patch.bitrateKbps) || patch.bitrateKbps < 100)
-  ) {
-    return 'bitrate must be at least 100 kbit/s'
-  }
-  if (patch.width !== undefined && (patch.width % 2 !== 0 || patch.width < 160)) {
-    return 'width must be even and at least 160'
-  }
-  if (patch.height !== undefined && (patch.height % 2 !== 0 || patch.height < 120)) {
-    return 'height must be even and at least 120'
-  }
-  if (patch.encoder !== undefined && !/^[\w-]+$/.test(patch.encoder)) {
-    return 'encoder name has unexpected characters'
-  }
-  if (patch.preset !== undefined && !/^[a-z]+$/.test(patch.preset)) {
-    return 'preset has unexpected characters'
-  }
-  return undefined
-}
-
-/** Encode one yuv420p frame to JPEG for the dashboard preview. */
+/** Encode one yuv420p frame to JPEG. */
 export function frameToJpeg(
   frame: Buffer,
   width: number,
@@ -361,7 +523,6 @@ export function frameToJpeg(
       '-vf', 'scale=640:-2',
       '-f', 'mjpeg', 'pipe:1',
     ])
-
     const chunks: Buffer[] = []
     ff.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
     ff.on('error', reject)
@@ -372,7 +533,6 @@ export function frameToJpeg(
         reject(new Error(`snapshot encode failed (${code})`))
       }
     })
-
     ff.stdin.on('error', () => {})
     ff.stdin.end(frame)
   })
