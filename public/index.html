@@ -74,6 +74,7 @@
   .tag.ding { color: var(--accent); border-color: var(--accent); }
   .tag.motion { color: var(--warn); border-color: var(--warn); }
   .tag.live { color: var(--ok); border-color: var(--ok); }
+  .thumb { height: 46px; border-radius: 4px; border: 1px solid var(--border); display: block; }
 
   #log { background: #0a0d12; border: 1px solid var(--border); border-radius: 8px;
          font-family: var(--mono); font-size: 12px; height: 62vh; overflow-y: auto; padding: 10px; }
@@ -108,6 +109,7 @@
   <span class="pill"><span class="dot" id="connDot"></span><span id="connTxt">connecting</span></span>
   <span class="pill">uptime <span id="uptime">–</span></span>
   <div class="spacer"></div>
+  <span class="pill" id="mqttPill" style="display:none">–</span>
   <span class="pill" id="camCount">–</span>
 </header>
 
@@ -143,7 +145,7 @@
       <span class="pill" id="evMeta">–</span>
     </div>
     <table>
-      <thead><tr><th>Time</th><th>Camera</th><th>Kind</th><th>State</th><th>Person</th><th>Source</th></tr></thead>
+      <thead><tr><th>Time</th><th>Camera</th><th>Kind</th><th>State</th><th>Person</th><th>Snapshot</th><th>Source</th></tr></thead>
       <tbody id="evBody"></tbody>
     </table>
     <div class="empty" id="evEmpty">No events yet.</div>
@@ -167,16 +169,27 @@
       <div class="row" id="tokenRow" style="display:none">
         <label>Admin token</label><input id="cfgToken" type="password" placeholder="token">
       </div>
+      <div class="row">
+        <label>Applies to</label>
+        <select id="cfgTarget"><option value="">All cameras (defaults)</option></select>
+      </div>
       <div class="row"><label>Resolution</label><input id="cfgSize" placeholder="1920x1080"></div>
       <div class="row"><label>Frame rate</label><input id="cfgFps" type="number" min="1" max="60"></div>
       <div class="row"><label>Encoder</label><input id="cfgEncoder" placeholder="libx264"></div>
       <div class="row"><label>CRF</label><input id="cfgCrf" type="number" min="0" max="51"></div>
       <div class="row"><label>x264 preset</label><input id="cfgPreset" placeholder="veryfast"></div>
       <div class="row"><label>Bitrate (kbit/s)</label><input id="cfgBitrate" type="number" placeholder="blank = use CRF"></div>
+      <div class="row">
+        <label>Ring connection</label>
+        <label class="check"><input type="checkbox" id="cfgAlwaysOn"> keep connected with no clients</label>
+      </div>
+      <div class="row"><label>Idle timeout (s)</label><input id="cfgIdle" type="number" min="0"></div>
       <p class="hint">
-        Changes restart the encoder. The RTSP session survives it — connected clients keep
-        their connection because the server rewrites RTP headers across the restart.
+        Changes are written to the config file and survive a restart. The encoder restarts,
+        but the RTSP session survives it — connected clients keep their connection because
+        the server rewrites RTP headers across the restart.
         Resolution above 1920×1080 gains nothing; Ring's source is 1080p.
+        Substreams are configured in the file, not here.
       </p>
       <button class="btn primary" id="cfgSave">Apply</button>
       <span id="cfgMsg"></span>
@@ -230,9 +243,11 @@ document.querySelectorAll('nav button').forEach((b) => {
 
 /* ---------- dashboard ---------- */
 let startedAt = 0;
-const previewTimers = new Map();
+const bytesMark = new Map();
 
+let lastStatus = null;
 function renderStatus(s) {
+  lastStatus = s;
   startedAt = s.startedAt;
   $('port').textContent = `· rtsp :${s.rtspPort}`;
   const liveCount = s.cameras.filter((c) => c.live).length;
@@ -252,48 +267,83 @@ function renderStatus(s) {
           <div class="spacer" style="flex:1"></div><span class="pill state"></span></div>
         <div class="preview"><img alt=""><div class="none">waiting for frame…</div></div>
         <dl class="kv">
+          <dt>Ring</dt><dd class="c-demand"></dd>
           <dt>Clients</dt><dd class="c-clients"></dd>
-          <dt>Output</dt><dd class="c-out"></dd>
-          <dt>Quality</dt><dd class="c-q"></dd>
+          <dt>Streams</dt><dd class="c-outs"></dd>
           <dt>Audio</dt><dd class="c-audio"></dd>
           <dt>Dropped</dt><dd class="c-drop"></dd>
           <dt>Peak queue</dt><dd class="c-peak"></dd>
           <dt>Encoder restarts</dt><dd class="c-rs"></dd>
         </dl>
-        <div class="url"></div>`;
+        <div class="url"></div>
+        <div style="padding:0 14px 14px"><button class="btn c-pin"></button></div>`;
       cams.appendChild(el);
 
-      // Refresh the preview independently of the status feed.
+      // Multipart MJPEG: real motion, and the server tears the encoder down
+      // when the last viewer disconnects.
       const img = el.querySelector('img');
-      const tick = () => {
-        const probe = new Image();
-        probe.onload = () => {
-          img.src = probe.src;
-          el.querySelector('.none').style.display = 'none';
-        };
-        probe.src = `/api/snapshot/${encodeURIComponent(cam.path)}?t=${Date.now()}`;
+      img.onload = () => { el.querySelector('.none').style.display = 'none'; };
+      img.onerror = () => { el.querySelector('.none').textContent = 'preview unavailable'; };
+      img.src = `/api/preview/${encodeURIComponent(cam.path)}`;
+
+      el.querySelector('.c-pin').onclick = async () => {
+        const btn = el.querySelector('.c-pin');
+        btn.disabled = true;
+        const seconds = btn.dataset.pinned === 'true' ? 0 : 300;
+        try {
+          await fetch(`/api/pin/${encodeURIComponent(cam.path)}?seconds=${seconds}`,
+            { method: 'POST', headers: authHeaders() });
+        } finally { btn.disabled = false; }
       };
-      tick();
-      previewTimers.set(cam.path, setInterval(tick, 4000));
     }
 
-    el.querySelector('.dot').className = 'dot ' + (cam.live ? 'ok' : 'warn');
+    const idle = !cam.connected && !cam.live;
+    el.querySelector('.dot').className =
+      'dot ' + (cam.live ? 'ok' : idle ? '' : 'warn');
     el.querySelector('strong').textContent = cam.name;
-    el.querySelector('.state').textContent = cam.live ? 'live' : 'waiting for Ring';
+    el.querySelector('.state').textContent =
+      cam.live ? 'live' : cam.connected ? 'connecting' : 'idle';
+    el.querySelector('.c-demand').textContent =
+      `${cam.connected ? 'connected' : 'disconnected'} · ${cam.demandReason}`;
     el.querySelector('.c-clients').textContent = cam.clients;
-    el.querySelector('.c-out').textContent =
-      `${cam.settings.width}×${cam.settings.height} @ ${cam.settings.fps}fps`;
-    el.querySelector('.c-q').textContent = cam.settings.bitrateKbps
-      ? `${cam.settings.encoder} ${cam.settings.bitrateKbps}kbps`
-      : `${cam.settings.encoder} crf ${cam.settings.crf}`;
-    el.querySelector('.c-audio').textContent = cam.hasAudio
+
+    const rate = (c) => {
+      const prev = bytesMark.get(c.path);
+      const now = Date.now();
+      bytesMark.set(c.path, { at: now, bytes: c.bytesSent });
+      if (!prev || now === prev.at) return null;
+      return ((c.bytesSent - prev.bytes) * 8) / (now - prev.at) / 1000;
+    };
+    el.querySelector('.c-outs').innerHTML = cam.outputs.map((o) => {
+      const mbps = rate(o);
+      return `${o.name === 'sub' ? 'sub ' : 'main'} ${o.width}×${o.height} @ ` +
+        `${o.measuredFps || o.fps}fps · ${o.bitrateKbps ? o.bitrateKbps + 'kbps' : 'crf ' + o.crf}` +
+        ` · ${o.clients} client${o.clients === 1 ? '' : 's'}` +
+        (o.clients > 0 && mbps !== null ? ` · ${mbps.toFixed(1)} Mbps out` : '');
+    }).join('<br>');
+
+    const mainOut = cam.outputs[0];
+    el.querySelector('.c-audio').textContent = mainOut?.hasAudio
       ? `on · ${cam.audioBufferedMs}ms buffered` : 'off';
     el.querySelector('.c-drop').textContent = cam.droppedFrames;
     el.querySelector('.c-peak').textContent = `${cam.peakQueuedFrames} frames`;
     el.querySelector('.c-rs').textContent = cam.encoderRestarts;
-    el.querySelector('.url').textContent = `rtsp://${host}:${s.rtspPort}/${cam.path}`;
+    el.querySelector('.url').innerHTML = cam.outputs
+      .map((o) => `rtsp://${host}:${s.rtspPort}/${o.path}`).join('<br>');
+
+    const pin = el.querySelector('.c-pin');
+    pin.dataset.pinned = String(cam.pinned);
+    pin.textContent = cam.alwaysOn
+      ? 'Always on (configured)'
+      : cam.pinned ? 'Disconnect now' : 'Connect for 5 min';
+    pin.disabled = cam.alwaysOn;
   }
 
+  if (s.mqtt?.enabled) {
+    $('mqttPill').style.display = '';
+    $('mqttPill').innerHTML =
+      `<span class="dot ${s.mqtt.connected ? 'ok' : 'err'}"></span>mqtt`;
+  }
   if (s.events.error) {
     $('evEmpty').textContent = 'Ring history error: ' + s.events.error;
     $('evEmpty').style.display = 'block';
@@ -326,6 +376,9 @@ function renderEvents() {
       <td><span class="tag ${cls}">${esc(e.kind)}</span></td>
       <td>${esc(e.state ?? '')}</td>
       <td>${e.personDetected ? '<span class="tag live">person</span>' : ''}</td>
+      <td>${e.snapshotUuid
+        ? `<img class="thumb" loading="lazy" src="/api/event-thumb/${encodeURIComponent(e.cameraName)}/${encodeURIComponent(e.snapshotUuid)}" alt="">`
+        : ''}</td>
       <td>${esc(e.source)}</td></tr>`;
   }).join('');
 }
@@ -382,15 +435,30 @@ $('logErrOnly').onchange = redrawLogs;
 $('logClear').onclick = () => { logLines = []; logEl.innerHTML = ''; };
 
 /* ---------- config ---------- */
-async function loadConfig() {
-  const d = await (await api('/api/config')).json();
-  const c = d.config;
+let fullConfig = null;
+function fillConfigForm() {
+  const target = $('cfgTarget').value;
+  const base = fullConfig.defaults;
+  const c = target ? { ...base, ...(fullConfig.cameras[target] || {}) } : base;
   $('cfgSize').value = `${c.width}x${c.height}`;
   $('cfgFps').value = c.fps;
   $('cfgEncoder').value = c.encoder;
   $('cfgCrf').value = c.crf;
   $('cfgPreset').value = c.preset;
   $('cfgBitrate').value = c.bitrateKbps ?? '';
+  $('cfgAlwaysOn').checked = Boolean(c.alwaysOn);
+  $('cfgIdle').value = c.idleTimeoutSec;
+}
+
+async function loadConfig() {
+  const d = await (await api('/api/config')).json();
+  fullConfig = d.config;
+  const names = (lastStatus?.cameras || []).map((c) => c.name);
+  const cur = $('cfgTarget').value;
+  $('cfgTarget').innerHTML = '<option value="">All cameras (defaults)</option>' +
+    names.map((n) => `<option${n === cur ? ' selected' : ''}>${esc(n)}</option>`).join('');
+  $('cfgTarget').onchange = fillConfigForm;
+  fillConfigForm();
   if (d.authRequired) {
     $('authNote').style.display = 'block';
     $('tokenRow').style.display = 'grid';
@@ -404,12 +472,17 @@ $('cfgSave').onclick = async () => {
   if (!m) { msg.textContent = 'Resolution must look like 1920x1080'; msg.style.color = 'var(--err)'; return; }
   const bitrate = $('cfgBitrate').value.trim();
   const body = {
-    width: +m[1], height: +m[2],
-    fps: +$('cfgFps').value,
-    encoder: $('cfgEncoder').value.trim(),
-    crf: +$('cfgCrf').value,
-    preset: $('cfgPreset').value.trim(),
-    bitrateKbps: bitrate === '' ? null : +bitrate,
+    camera: $('cfgTarget').value || null,
+    patch: {
+      width: +m[1], height: +m[2],
+      fps: +$('cfgFps').value,
+      encoder: $('cfgEncoder').value.trim(),
+      crf: +$('cfgCrf').value,
+      preset: $('cfgPreset').value.trim(),
+      bitrateKbps: bitrate === '' ? undefined : +bitrate,
+      alwaysOn: $('cfgAlwaysOn').checked,
+      idleTimeoutSec: +$('cfgIdle').value,
+    },
   };
   msg.textContent = 'Applying…'; msg.style.color = 'var(--muted)';
   const r = await fetch('/api/config', {
@@ -419,13 +492,12 @@ $('cfgSave').onclick = async () => {
   });
   if (r.status === 401) { showLock(); msg.textContent = 'Admin token required'; msg.style.color = 'var(--err)'; return; }
   const d = await r.json();
-  if (!r.ok) { msg.textContent = d.error; msg.style.color = 'var(--err)'; return; }
-  msg.style.color = 'var(--ok)';
-  msg.textContent = d.applied.length ? `Applied: ${d.applied.join(', ')}` : 'No changes';
-  if (d.restartRequired?.length) {
-    msg.style.color = 'var(--warn)';
-    msg.textContent += ` · restart needed for: ${d.restartRequired.join(', ')}`;
+  if (!r.ok || d.error) {
+    msg.textContent = d.error || 'failed'; msg.style.color = 'var(--err)'; return;
   }
+  msg.style.color = 'var(--ok)';
+  msg.textContent = `Saved to ${d.configPath.split('/').pop()}`;
+  await loadConfig();
 };
 
 /* ---------- live stream ---------- */
