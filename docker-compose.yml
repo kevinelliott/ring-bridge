@@ -1,0 +1,15 @@
+services:
+  ring-bridge:
+    build: .
+    # Host networking keeps RTSP simple: no port juggling for RTP, and NVRs on
+    # the LAN reach the stream at the host's own address.
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      # Ring rotates this token; mount .env read-write so the new one persists.
+      RING_REFRESH_TOKEN: ${RING_REFRESH_TOKEN}
+    volumes:
+      - ./config:/config
+    # Uncomment for Intel Quick Sync or VA-API hardware encoding:
+    # devices:
+    #   - /dev/dri:/dev/dri

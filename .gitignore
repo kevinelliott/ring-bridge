@@ -1,3 +1,6 @@
 node_modules/
 .env
 .gstack/
+ring-bridge.config.json
+config/
+*.log
