@@ -1,6 +1,6 @@
 {
   "name": "ring-bridge",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -28,5 +28,14 @@
   },
   "bin": {
     "ring-bridge": "./cli.ts"
-  }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "*.ts",
+    "public/",
+    "README.md",
+    "LICENSE"
+  ]
 }

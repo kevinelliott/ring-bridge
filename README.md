@@ -1,5 +1,8 @@
 # ring-bridge
 
+[![CI](https://github.com/kevinelliott/ring-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/kevinelliott/ring-bridge/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Turn Ring cameras into a stable RTSP stream for Frigate and other NVRs — with a stream
 that never drops, even while Ring is reconnecting.
 
