@@ -22,6 +22,8 @@ export interface RingEventRecord {
   readonly state?: string
   readonly personDetected?: boolean
   readonly source: EventSource
+  /** Ring snapshot id, when the push notification carried one. */
+  readonly snapshotUuid?: string
 }
 
 const HISTORY_LIMIT = 200
@@ -31,6 +33,9 @@ const FETCH_LIMIT = 25
 type Listener = (event: RingEventRecord) => void
 
 export class RingEventCollector {
+  /** Cameras by name, so the admin server can fetch snapshots by id. */
+  readonly byName = new Map<string, RingCamera>()
+
   private readonly events = new Map<string, RingEventRecord>()
   private readonly listeners = new Set<Listener>()
   private readonly subscriptions: Subscription[] = []
@@ -40,6 +45,9 @@ export class RingEventCollector {
 
   constructor(cameras: RingCamera[]) {
     this.cameras = cameras
+    for (const camera of cameras) {
+      this.byName.set(camera.name, camera)
+    }
   }
 
   /** Attach to live push notifications for every bridged camera. */
@@ -54,6 +62,7 @@ export class RingEventCollector {
             notification.analytics?.server_correlation_id
 
           this.add({
+            snapshotUuid: camera.latestNotificationSnapshotUuid,
             id: dingId ? String(dingId) : `${camera.id}-${Date.now()}`,
             cameraName: camera.name,
             cameraId: camera.id,

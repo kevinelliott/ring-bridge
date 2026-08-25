@@ -8,6 +8,8 @@
  * systemd journals are unaffected.
  */
 
+import { appendFileSync, statSync, renameSync, existsSync } from 'node:fs'
+
 export type LogLevel = 'info' | 'error'
 
 export interface LogEntry {
@@ -20,6 +22,7 @@ export interface LogEntry {
 type Listener = (entry: LogEntry) => void
 
 const HISTORY_LIMIT = 1000
+const MAX_FILE_BYTES = 8 * 1024 * 1024
 
 class LogBus {
   private readonly history: LogEntry[] = []
@@ -28,6 +31,8 @@ class LogBus {
   private installed = false
   /** Guards against a listener that logs, which would recurse forever. */
   private dispatching = false
+  private logFile?: string
+  private fileError = false
 
   install(): void {
     if (this.installed) {
@@ -73,6 +78,7 @@ class LogBus {
         text: line,
       }
 
+      this.appendToFile(entry)
       this.history.push(entry)
       if (this.history.length > HISTORY_LIMIT) {
         this.history.shift()
@@ -86,6 +92,37 @@ class LogBus {
       } finally {
         this.dispatching = false
       }
+    }
+  }
+
+  /**
+   * Also append every line to a file, so a crash leaves evidence behind. The
+   * in-memory ring buffer disappears with the process, which is exactly when
+   * the log matters most. Rotated once past MAX_FILE_BYTES, keeping one
+   * previous generation.
+   */
+  mirrorToFile(path: string): void {
+    this.logFile = path
+    console.log(`[log] mirroring to ${path}`)
+  }
+
+  private appendToFile(entry: LogEntry): void {
+    if (!this.logFile || this.fileError) {
+      return
+    }
+    try {
+      const line =
+        `${new Date(entry.at).toISOString()} ${entry.level === 'error' ? 'ERR' : 'INF'} ` +
+        `${entry.text}\n`
+      appendFileSync(this.logFile, line)
+
+      if (existsSync(this.logFile) && statSync(this.logFile).size > MAX_FILE_BYTES) {
+        renameSync(this.logFile, `${this.logFile}.1`)
+      }
+    } catch (error) {
+      // Never let logging break the bridge; report once and stop trying.
+      this.fileError = true
+      process.stderr.write(`[log] file logging disabled: ${String(error)}\n`)
     }
   }
 
