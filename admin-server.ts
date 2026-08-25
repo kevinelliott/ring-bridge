@@ -11,7 +11,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { randomBytes } from 'node:crypto'
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
+import type { Writable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { timingSafeEqual } from 'node:crypto'
@@ -25,6 +26,8 @@ const projectRoot = dirname(fileURLToPath(import.meta.url))
 const UI_PATH = join(projectRoot, 'public', 'index.html')
 /** Preview frame rate; low enough to stay cheap, high enough to look live. */
 const MJPEG_FPS = 5
+/** JPEG end-of-image marker, used to split the MJPEG stream into frames. */
+const JPEG_EOI = Buffer.from([0xff, 0xd9])
 
 export interface OutputStatus extends OutputStats {
   path: string
@@ -400,46 +403,114 @@ export class AdminServer {
   }
 }
 
-/** Encodes the publisher's current frame to JPEG for any number of viewers. */
+/**
+ * Streams MJPEG to any number of viewers from a single long-lived encoder.
+ *
+ * The obvious implementation -- encode each frame with its own ffmpeg -- costs
+ * a process spawn per frame, which at 5fps across a few cameras is enough to
+ * matter on the low-power hosts this tends to run on. Instead one ffmpeg is
+ * held open per camera, fed raw frames on stdin and emitting a continuous MJPEG
+ * stream on stdout, which is split back into frames here and fanned out.
+ */
 class MjpegSession {
   private readonly viewers = new Set<ServerResponse>()
   private readonly stopFrames: () => void
   private readonly onEmpty: () => void
-  private encoder?: ReturnType<typeof spawn>
-  private busy = false
-  private lastSentAt = 0
-  private latest?: { frame: Buffer; width: number; height: number }
+  private encoder?: ChildProcess
+  private stdin?: Writable
+  private buffer: Buffer = Buffer.alloc(0)
+  private lastWriteAt = 0
+  /** Geometry the current encoder was started for; a change restarts it. */
+  private geometry = ''
+  private closed = false
 
   constructor(publisher: ContinuousPublisher, onEmpty: () => void) {
     this.onEmpty = onEmpty
-    this.stopFrames = publisher.onFrame(() => {
-      const current = publisher.currentFrame()
-      if (current) {
-        this.latest = current
-        void this.maybeEncode()
+    this.stopFrames = publisher.onFrame((frame, width, height) => {
+      this.feed(frame, width, height)
+    })
+  }
+
+  private feed(frame: Buffer, width: number, height: number): void {
+    if (this.closed || this.viewers.size === 0) {
+      return
+    }
+
+    const geometry = `${width}x${height}`
+    if (geometry !== this.geometry) {
+      this.restartEncoder(geometry)
+    }
+
+    // Throttle here rather than in ffmpeg so the encoder's declared input rate
+    // and the actual write rate agree.
+    const now = Date.now()
+    if (now - this.lastWriteAt < 1000 / MJPEG_FPS) {
+      return
+    }
+    this.lastWriteAt = now
+
+    // Drop rather than queue: a stalled preview must never hold frames.
+    if (this.stdin?.writable && (this.stdin.writableLength ?? 0) < frame.length * 3) {
+      this.stdin.write(frame)
+    }
+  }
+
+  private restartEncoder(geometry: string): void {
+    this.encoder?.kill('SIGKILL')
+    this.buffer = Buffer.alloc(0)
+    this.geometry = geometry
+
+    const child = spawn('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error',
+      '-f', 'rawvideo', '-pix_fmt', 'yuv420p',
+      '-s', geometry, '-r', String(MJPEG_FPS),
+      '-i', 'pipe:0',
+      '-vf', 'scale=640:-2',
+      '-q:v', '6',
+      '-f', 'mjpeg', 'pipe:1',
+    ])
+
+    this.encoder = child
+    this.stdin = child.stdin ?? undefined
+    this.stdin?.on('error', () => {})
+    child.stdout?.on('data', (chunk: Buffer) => this.onEncoded(chunk))
+    child.on('exit', () => {
+      if (!this.closed && child === this.encoder) {
+        this.encoder = undefined
+        this.stdin = undefined
+        this.geometry = ''
       }
     })
   }
 
-  private async maybeEncode(): Promise<void> {
-    const now = Date.now()
-    if (this.busy || now - this.lastSentAt < 1000 / MJPEG_FPS || !this.latest) {
-      return
-    }
-    this.busy = true
-    this.lastSentAt = now
-    const { frame, width, height } = this.latest
-    try {
-      const jpeg = await frameToJpeg(frame, width, height)
-      for (const viewer of this.viewers) {
-        viewer.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`)
-        viewer.write(jpeg)
-        viewer.write('\r\n')
+  /** Split the MJPEG stream on JPEG end-of-image markers and fan each out. */
+  private onEncoded(chunk: Buffer): void {
+    this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk])
+
+    for (;;) {
+      const end = this.buffer.indexOf(JPEG_EOI, 2)
+      if (end === -1) {
+        break
       }
-    } catch {
-      // A dropped preview frame is not worth surfacing.
-    } finally {
-      this.busy = false
+      const jpeg = this.buffer.subarray(0, end + 2)
+      this.buffer = this.buffer.subarray(end + 2)
+      this.send(jpeg)
+    }
+
+    // A frame this large means the marker scan has lost sync; start over
+    // rather than growing without bound.
+    if (this.buffer.length > 8 * 1024 * 1024) {
+      this.buffer = Buffer.alloc(0)
+    }
+  }
+
+  private send(jpeg: Buffer): void {
+    for (const viewer of this.viewers) {
+      viewer.write(
+        `--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`,
+      )
+      viewer.write(jpeg)
+      viewer.write('\r\n')
     }
   }
 
@@ -459,8 +530,13 @@ class MjpegSession {
   }
 
   close(): void {
+    if (this.closed) {
+      return
+    }
+    this.closed = true
     this.stopFrames()
     this.encoder?.kill('SIGKILL')
+    this.encoder = undefined
     for (const viewer of this.viewers) {
       viewer.end()
     }
@@ -469,7 +545,6 @@ class MjpegSession {
   }
 }
 
-/** Audio uploads are larger than config payloads but still bounded. */
 function readBinaryBody(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []

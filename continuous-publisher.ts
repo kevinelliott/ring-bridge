@@ -148,7 +148,9 @@ export class ContinuousPublisher {
   private readonly startedAt = Date.now()
 
   /** Frame subscribers, used by the dashboard's MJPEG preview. */
-  private readonly frameListeners = new Set<(frame: Buffer) => void>()
+  private readonly frameListeners = new Set<
+    (frame: Buffer, width: number, height: number) => void
+  >()
 
   constructor(options: PublisherOptions) {
     this.options = options
@@ -237,7 +239,9 @@ export class ContinuousPublisher {
     this.audioPending = Buffer.alloc(0)
   }
 
-  onFrame(listener: (frame: Buffer) => void): () => void {
+  onFrame(
+    listener: (frame: Buffer, width: number, height: number) => void,
+  ): () => void {
     this.frameListeners.add(listener)
     return () => this.frameListeners.delete(listener)
   }
@@ -603,8 +607,9 @@ export class ContinuousPublisher {
     }
 
     if (this.frameListeners.size > 0) {
+      const { sourceWidth, sourceHeight } = this.options
       for (const listener of this.frameListeners) {
-        listener(frame)
+        listener(frame, sourceWidth, sourceHeight)
       }
     }
   }
