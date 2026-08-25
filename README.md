@@ -54,10 +54,26 @@ cp .env.example .env
 Ring rotates this token and invalidates the old one, so the bridge writes each new value
 back to `.env` automatically. Keep the file writable and never commit it.
 
-**4. Check your cameras**
+**4. Check your machine and account**
 
 ```sh
-npm start
+npx ring-bridge doctor
+```
+
+```
+  ✔  node               v22.20.0
+  ✔  ffmpeg             found, version 9.0.1
+  ✔  rtsp port          0.0.0.0:8554 is free
+  ✔  ring token         valid — 1 location(s), 2 camera(s)
+  ✔  encoder            "libx264" works
+  !  hardware encoding  Apple VideoToolbox is available — "--encoder h264_videotoolbox" would cut CPU sharply
+  ✔  cpu                12 cores for ~2 camera(s)
+```
+
+**5. Check your cameras**
+
+```sh
+npx ring-bridge list
 ```
 
 ```
@@ -68,10 +84,10 @@ Home  (abc123-xyz) — 2 cameras
   └─ Backyard    Floodlight Cam  wired  offline
 ```
 
-**5. Run the bridge**
+**6. Run the bridge**
 
 ```sh
-npm run bridge
+npx ring-bridge run
 ```
 
 ```
@@ -86,6 +102,29 @@ becomes `front_door`. Verify with any RTSP client:
 
 ```sh
 ffplay -rtsp_transport tcp rtsp://localhost:8554/front_door
+```
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `ring-bridge run` | Run the bridge (the default if you give no command) |
+| `ring-bridge list [--json]` | List locations and cameras |
+| `ring-bridge test [name]` | Dial one camera and report exactly what Ring sends |
+| `ring-bridge doctor` | Check ffmpeg, ports, token, encoder, and CPU headroom |
+| `ring-bridge encoders` | Show the best available video encoder |
+
+`ring-bridge test` is the fastest way to answer "is the quality problem mine or Ring's":
+
+```
+$ npx ring-bridge test "Front Door" -n 8
+
+What Ring actually sends:
+  resolution   1920x1080
+  frame rate   20/1
+  video codec  h264
+  bitrate      2.65 Mbps
+  audio        aac @ 48000 Hz
 ```
 
 ## Connect it to your NVR
@@ -123,16 +162,103 @@ The output is standard RTSP (H.264 + AAC) over TCP or UDP, so anything that acce
 RTSP URL should work — Blue Iris, Scrypted, Shinobi, ZoneMinder, go2rtc. Recipes for
 those are coming; open an issue if you get one working and want it documented.
 
+## On-demand connections
+
+By default a camera is dialed **only while something is watching** — an RTSP client, or a
+temporary connection from the dashboard. This matters for three reasons:
+
+- **Battery cameras become usable.** Holding live view open around the clock drains them
+  in hours.
+- **Less exposure to Ring's rate limits.** There is no documented quota, so less is safer.
+- **A readable event history.** Every dial writes an `on_demand` event into Ring's history;
+  connecting only on demand stops the bridge from drowning out real events.
+
+When nobody is watching, the stream still exists — it serves the frozen last frame with
+the spinner — so your NVR never sees a dead endpoint.
+
+Some feeds need an always-current frame regardless. Force those on per camera:
+
+```json
+{
+  "cameras": {
+    "Front Door": { "alwaysOn": true }
+  }
+}
+```
+
+Or globally with `--always-on`. The dashboard also has a **Connect for 5 min** button per
+camera for a temporary look without changing any config.
+
+`idleTimeoutSec` (default 30) keeps Ring connected briefly after the last client leaves,
+so a quick reconnect does not pay for a fresh dial.
+
+## Configuration file
+
+Settings live in `ring-bridge.config.json` next to the project, overridable per camera.
+The dashboard writes to this file, so anything you tune in the browser survives a restart.
+CLI flags override the file for that run only, and are never written back.
+
+```json
+{
+  "rtspPort": 8554,
+  "webPort": 8080,
+  "webToken": "change-me",
+  "logFile": "/var/log/ring-bridge.log",
+  "webhookUrl": "https://example.com/hooks/ring",
+  "mqtt": {
+    "url": "mqtt://192.168.1.10:1883",
+    "username": "homeassistant",
+    "password": "secret",
+    "topicPrefix": "ring-bridge",
+    "discoveryPrefix": "homeassistant"
+  },
+  "defaults": {
+    "width": 1920, "height": 1080, "fps": 20,
+    "encoder": "libx264", "crf": 21, "preset": "veryfast",
+    "audio": true, "onDemand": true, "idleTimeoutSec": 30
+  },
+  "cameras": {
+    "Front Door": {
+      "alwaysOn": true,
+      "substream": { "width": 640, "height": 360, "fps": 5, "crf": 28 }
+    },
+    "Old Camera": { "enabled": false }
+  }
+}
+```
+
+## Substreams
+
+Frigate detects on a low-resolution stream and records the high-resolution one. Add a
+`substream` to any camera and it is published alongside the main stream at
+`<path>_sub`, encoded from the same decoded frames — so it costs an encode but not a
+second decode, and it is cheaper than making Frigate downscale.
+
+```yaml
+cameras:
+  front_door:
+    ffmpeg:
+      inputs:
+        - path: rtsp://<bridge-host>:8554/front_door_sub
+          roles: [detect]
+        - path: rtsp://<bridge-host>:8554/front_door
+          roles: [record, audio]
+    detect:
+      width: 640
+      height: 360
+      fps: 5
+```
+
 ## Dashboard
 
 `http://<bridge-host>:8080` — four tabs:
 
 | Tab | What's there |
 | --- | --- |
-| **Dashboard** | Live preview per camera, connection state, client count, output settings, queue health |
-| **Ring Events** | Doorbell presses, motion, person detection — live and backfilled from Ring history |
+| **Dashboard** | Live MJPEG preview per camera, Ring connection state and why, per-output resolution/measured fps/bitrate/clients, queue health, and a Connect button for on-demand cameras |
+| **Ring Events** | Doorbell presses, motion, person detection — live and backfilled from Ring history, with snapshot thumbnails |
 | **Logs** | Everything the bridge prints, streamed live, with filtering |
-| **Configuration** | Change resolution, frame rate, encoder, and quality without dropping clients |
+| **Configuration** | Per-camera or global resolution, frame rate, encoder, quality, and always-on — written to the config file |
 
 Applying a configuration change restarts the encoder, and **connected clients keep their
 RTSP session** — the server rewrites RTP headers across the restart so the change is
@@ -142,6 +268,7 @@ invisible downstream.
 dials Ring it creates one — they are mostly the bridge's own activity, not real events.
 
 ### Securing the dashboard
+
 
 By default the dashboard binds to `0.0.0.0` with **no authentication**, so anyone who can
 reach the port can view camera snapshots, logs, and events, and change encoder settings.
@@ -205,6 +332,71 @@ User=ring
 WantedBy=multi-user.target
 ```
 
+## Integrations
+
+### Home Assistant (MQTT)
+
+Set `mqtt.url` in the config and the bridge publishes Home Assistant discovery messages,
+so motion and doorbell entities appear on their own — no YAML. Availability is a retained
+last-will topic, so entities show as unavailable if the bridge stops rather than going
+quietly stale.
+
+```
+ring-bridge/status                 online | offline   (retained)
+ring-bridge/<camera>/motion        ON | OFF           (retained)
+ring-bridge/<camera>/ding          ON | OFF           (retained)
+ring-bridge/<camera>/event         JSON payload
+```
+
+Ring reports a trigger rather than a duration, so sensors release themselves 30 seconds
+after firing.
+
+### Webhooks
+
+Set `webhookUrl` to POST every Ring event as JSON. Failures are logged and dropped rather
+than retried — a queue of stale doorbell presses helps nobody.
+
+```json
+{ "camera": "Front Door", "kind": "motion", "at": "2026-08-24T21:15:02.000Z",
+  "personDetected": true, "source": "push" }
+```
+
+### Prometheus
+
+`GET /metrics` on the dashboard port, in the standard text format:
+
+```
+ring_bridge_camera_live{camera="Front Door"} 1
+ring_bridge_camera_connected{camera="Front Door"} 1
+ring_bridge_camera_clients{camera="Front Door"} 2
+ring_bridge_camera_dropped_frames_total{camera="Front Door"} 0
+ring_bridge_camera_peak_queued_frames{camera="Front Door"} 8
+ring_bridge_output_fps{camera="Front Door",output="sub"} 4.9
+```
+
+### Two-way audio
+
+POST an audio file to play it through a doorbell's speaker. An on-demand camera is woken
+first, so this works even when it is idle.
+
+```sh
+curl -X POST --data-binary @message.wav \
+  -H "x-admin-token: $TOKEN" \
+  http://<bridge-host>:8080/api/talk/front_door
+```
+
+## Docker
+
+```sh
+cp .env.example .env      # add your token
+mkdir -p config
+docker compose up -d
+```
+
+Host networking is used so RTP needs no port juggling and NVRs reach the stream at the
+host's address. The config file lives in `./config`, so dashboard changes survive a
+rebuild. Uncomment the `devices` block for Intel Quick Sync or VA-API.
+
 ## Resolution and quality
 
 **Ring's stream is the ceiling.** A Doorbell Elite sends 1920x1080 H.264 at 20fps, around
@@ -220,13 +412,15 @@ re-encoding, so budget roughly one modern core per 1080p20 camera at
 `libx264 -preset veryfast`. To reduce it:
 
 ```sh
-npm run bridge -- --fps 10                        # halve the frame rate
-npm run bridge -- --size 1280x720                 # smaller output
-npm run bridge -- --encoder h264_videotoolbox --bitrate 6000   # macOS hardware encoder
+ring-bridge run --encoder auto     # detect and use hardware encoding
+ring-bridge run --fps 10           # halve the frame rate
+ring-bridge run --size 1280x720    # smaller output
 ```
 
-On Linux, try `h264_qsv` (Intel), `h264_nvenc` (NVIDIA), or `h264_v4l2m2m` (Raspberry Pi).
-Hardware encoders ignore `--crf`, so pass `--bitrate`.
+`--encoder auto` probes for VideoToolbox, NVENC, Quick Sync, VA-API, and V4L2 M2M by
+running a real test encode, so it never selects one that is present but non-functional.
+`ring-bridge encoders` shows what it found. Hardware encoders ignore `--crf`, so pass
+`--bitrate` with them.
 
 ## Troubleshooting
 
@@ -315,7 +509,12 @@ client joining mid-GOP decodes immediately.
 
 ```sh
 npm run typecheck
+npm test
 ```
+
+Tests cover the parts where a silent regression would be expensive: config merging and
+validation, RTP header rewriting across an encoder restart, SPS/PPS sniffing, the
+on-demand state machine, the `.env` token rewrite, and the placeholder compositor.
 
 Built on [ring-client-api](https://github.com/dgreif/ring). Not affiliated with Ring or
 Amazon.

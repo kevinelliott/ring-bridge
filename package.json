@@ -1,19 +1,32 @@
 {
-  "name": "ring",
+  "name": "ring-bridge",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "tsx --env-file-if-exists=.env ring.ts",
+    "start": "tsx --env-file-if-exists=.env cli.ts",
+    "bridge": "tsx --env-file-if-exists=.env cli.ts run",
+    "list": "tsx --env-file-if-exists=.env cli.ts list",
+    "doctor": "tsx --env-file-if-exists=.env cli.ts doctor",
     "typecheck": "tsc --noEmit",
-    "bridge": "tsx --env-file-if-exists=.env frigate-bridge.ts"
+    "test": "tsx --test test/*.test.ts"
   },
   "dependencies": {
+    "mqtt": "^5.15.2",
     "ring-client-api": "^14.3.0"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2"
+  },
+  "description": "Serve Ring cameras as RTSP for Frigate and other NVRs",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kevinelliott/ring-bridge.git"
+  },
+  "bin": {
+    "ring-bridge": "./cli.ts"
   }
 }
