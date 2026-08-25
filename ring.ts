@@ -1,10 +1,9 @@
+/**
+ * Camera lister: locations and their nested cameras.
+ */
 import { RingApi, type Location, type RingCamera } from 'ring-client-api'
 import { loadRefreshToken, persistRefreshTokenUpdates } from './ring-auth.ts'
 
-const ringApi = new RingApi({ refreshToken: loadRefreshToken() })
-const stopPersistingToken = persistRefreshTokenUpdates(ringApi)
-
-/** Right-pad `value` so columns line up in the tree output. */
 function pad(value: string, width: number): string {
   return value.padEnd(width)
 }
@@ -14,10 +13,8 @@ function describePower(camera: RingCamera): string {
   if (!camera.hasBattery) {
     return 'wired'
   }
-
   const level = camera.batteryLevel
   const charging = camera.isCharging ? ' (charging)' : ''
-
   return level === null ? 'battery ?' : `battery ${level}%${charging}`
 }
 
@@ -29,7 +26,6 @@ function formatCamera(
 ): string {
   const branch = isLast ? '└─' : '├─'
   const status = camera.isOffline ? 'offline' : 'online'
-
   return [
     `  ${branch} ${pad(camera.name, widths.name)}`,
     pad(camera.model, widths.model),
@@ -40,7 +36,9 @@ function formatCamera(
 
 function formatLocation(location: Location): string {
   const { cameras } = location
-  const lines = [`${location.name}  (${location.id}) — ${cameras.length} camera${cameras.length === 1 ? '' : 's'}`]
+  const lines = [
+    `${location.name}  (${location.id}) — ${cameras.length} camera${cameras.length === 1 ? '' : 's'}`,
+  ]
 
   if (cameras.length === 0) {
     lines.push('  └─ (no cameras)')
@@ -61,13 +59,43 @@ function formatLocation(location: Location): string {
   return lines.join('\n')
 }
 
-const locations = await ringApi.getLocations()
+export async function listCameras(options: { json?: boolean } = {}): Promise<number> {
+  const ringApi = new RingApi({ refreshToken: loadRefreshToken() })
+  const stopPersistingToken = persistRefreshTokenUpdates(ringApi)
+  const locations = await ringApi.getLocations()
 
-console.log(
-  `\nRing locations (${locations.length})\n\n` +
-    locations.map(formatLocation).join('\n\n') +
-    '\n',
-)
+  if (options.json) {
+    console.log(
+      JSON.stringify(
+        locations.map((location) => ({
+          id: location.id,
+          name: location.name,
+          cameras: location.cameras.map((camera) => ({
+            id: camera.id,
+            name: camera.name,
+            model: camera.model,
+            deviceType: camera.deviceType,
+            offline: camera.isOffline,
+            hasBattery: camera.hasBattery,
+            batteryLevel: camera.batteryLevel,
+            hasLight: camera.hasLight,
+            hasSiren: camera.hasSiren,
+            rtspPath: camera.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, ''),
+          })),
+        })),
+        null,
+        2,
+      ),
+    )
+  } else {
+    console.log(
+      `\nRing locations (${locations.length})\n\n` +
+        locations.map(formatLocation).join('\n\n') +
+        '\n',
+    )
+  }
 
-stopPersistingToken()
-ringApi.disconnect()
+  stopPersistingToken()
+  ringApi.disconnect()
+  return 0
+}
