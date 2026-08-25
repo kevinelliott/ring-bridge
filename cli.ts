@@ -161,27 +161,41 @@ if (args.encoderAuto) {
   args.overrides.encoder = best.name
 }
 
-switch (args.command) {
-  case 'list':
-    process.exit(await listCameras({ json: args.json }))
-    break
-  case 'doctor':
-    process.exit(await runDoctor(args.configPath))
-    break
-  case 'encoders': {
-    const best = await detectBestEncoder()
-    console.log(`Best available: ${best.name}  (${best.label})`)
-    console.log(
-      best.hardware
-        ? 'Use it with:  ring-bridge run --encoder ' + best.name
-        : 'No working hardware encoder found; libx264 will use roughly one core per 1080p camera.',
-    )
-    process.exit(0)
-    break
+/**
+ * Report failures as a sentence rather than a stack trace. A missing token or
+ * an unreachable Ring is a setup problem, not a crash, and the person seeing it
+ * is usually mid-install.
+ */
+try {
+  switch (args.command) {
+    case 'list':
+      process.exit(await listCameras({ json: args.json }))
+      break
+    case 'doctor':
+      process.exit(await runDoctor(args.configPath))
+      break
+    case 'encoders': {
+      const best = await detectBestEncoder()
+      console.log(`Best available: ${best.name}  (${best.label})`)
+      console.log(
+        best.hardware
+          ? 'Use it with:  ring-bridge run --encoder ' + best.name
+          : 'No working hardware encoder found; libx264 will use roughly one core per 1080p camera.',
+      )
+      process.exit(0)
+      break
+    }
+    case 'test':
+      process.exit(await runCameraTest(args.testName, args.testSeconds, args.testKeep))
+      break
+    default:
+      await runBridge({ configPath: args.configPath, overrides: args.overrides })
   }
-  case 'test':
-    process.exit(await runCameraTest(args.testName, args.testSeconds, args.testKeep))
-    break
-  default:
-    await runBridge({ configPath: args.configPath, overrides: args.overrides })
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error)
+  console.error(`\nring-bridge ${args.command}: ${message}`)
+  if (/RING_REFRESH_TOKEN/.test(message)) {
+    console.error('\nRun `npx ring-bridge doctor` to check the rest of your setup.')
+  }
+  process.exit(1)
 }
