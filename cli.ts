@@ -10,12 +10,15 @@ import { runBridge, type CliOverrides } from './bridge.ts'
 import { runDoctor } from './doctor.ts'
 import { runCameraTest } from './camera-test.ts'
 import { listCameras } from './ring.ts'
+import { runLogin } from './login-cli.ts'
 import { resolveConfigPath, parseSize, validateSettings } from './config.ts'
 import { detectBestEncoder } from './encoder-detect.ts'
+import { isAuthError } from './ring-login.ts'
 
 const USAGE = `ring-bridge — serve Ring cameras as RTSP
 
 Usage:
+  ring-bridge login                 Log in to Ring and save a refresh token
   ring-bridge run [options]         Run the bridge (default)
   ring-bridge list [--json]         List locations and cameras
   ring-bridge test [name] [-n SEC]  Dial one camera and report what Ring sends
@@ -57,7 +60,7 @@ interface ParsedArgs {
 }
 
 function parse(argv: string[]): ParsedArgs {
-  const known = new Set(['run', 'list', 'test', 'doctor', 'encoders', 'help'])
+  const known = new Set(['run', 'list', 'test', 'doctor', 'encoders', 'login', 'help'])
   let command = 'run'
   let index = 0
   if (argv[0] && known.has(argv[0])) {
@@ -168,6 +171,9 @@ if (args.encoderAuto) {
  */
 try {
   switch (args.command) {
+    case 'login':
+      process.exit(await runLogin())
+      break
     case 'list':
       process.exit(await listCameras({ json: args.json }))
       break
@@ -195,7 +201,11 @@ try {
   const message = error instanceof Error ? error.message : String(error)
   console.error(`\nring-bridge ${args.command}: ${message}`)
   if (/RING_REFRESH_TOKEN/.test(message)) {
-    console.error('\nRun `npx ring-bridge doctor` to check the rest of your setup.')
+    console.error('\nRun `npx ring-bridge login` to sign in and save one.')
+  } else if (isAuthError(error)) {
+    console.error(
+      '\nRing rejected the stored refresh token. Run `npx ring-bridge login` to sign in again.',
+    )
   }
   process.exit(1)
 }

@@ -17,9 +17,8 @@ export function loadRefreshToken(): string {
 
   if (!token) {
     throw new Error(
-      `Missing ${TOKEN_KEY}. Put your Ring refresh token in .env ` +
-        '(see .env.example), or export it in the environment. ' +
-        'Generate one with: npx -p ring-client-api ring-auth-cli',
+      `Missing ${TOKEN_KEY}. Run \`ring-bridge login\` to sign in to Ring ` +
+        'and save one, or set it in the environment yourself.',
     )
   }
 
