@@ -39,25 +39,23 @@ cd ring-bridge
 npm install
 ```
 
-**2. Get a Ring refresh token**
+**2. Log in to Ring**
 
 ```sh
-npx -p ring-client-api ring-auth-cli
+npx ring-bridge login
 ```
 
-It asks for your Ring email, password, and 2FA code, then prints a token.
+It asks for your email, password, and the verification code Ring sends, then writes a
+refresh token to `.env` for you.
 
-**3. Save it**
+Your password is used once to obtain that token and is never stored. Ring rotates the
+token on every refresh and invalidates the old one, so the bridge writes each new value
+back to `.env` automatically — this should be a one-time step. Keep the file writable and
+never commit it.
 
-```sh
-cp .env.example .env
-# paste the token into RING_REFRESH_TOKEN
-```
+You can also sign in from the dashboard, under **Configuration → Ring account**.
 
-Ring rotates this token and invalidates the old one, so the bridge writes each new value
-back to `.env` automatically. Keep the file writable and never commit it.
-
-**4. Check your machine and account**
+**3. Check your machine and account**
 
 ```sh
 npx ring-bridge doctor
@@ -73,7 +71,7 @@ npx ring-bridge doctor
   ✔  cpu                12 cores for ~2 camera(s)
 ```
 
-**5. Check your cameras**
+**4. Check your cameras**
 
 ```sh
 npx ring-bridge list
@@ -87,7 +85,7 @@ Home  (abc123-xyz) — 2 cameras
   └─ Backyard    Floodlight Cam  wired  offline
 ```
 
-**6. Run the bridge**
+**5. Run the bridge**
 
 ```sh
 npx ring-bridge run
@@ -111,6 +109,7 @@ ffplay -rtsp_transport tcp rtsp://localhost:8554/front_door
 
 | Command | What it does |
 | --- | --- |
+| `ring-bridge login` | Log in to Ring and save a refresh token to `.env` |
 | `ring-bridge run` | Run the bridge (the default if you give no command) |
 | `ring-bridge list [--json]` | List locations and cameras |
 | `ring-bridge test [name]` | Dial one camera and report exactly what Ring sends |
@@ -164,6 +163,36 @@ Notes:
 The output is standard RTSP (H.264 + AAC) over TCP or UDP, so anything that accepts an
 RTSP URL should work — Blue Iris, Scrypted, Shinobi, ZoneMinder, go2rtc. Recipes for
 those are coming; open an issue if you get one working and want it documented.
+
+## When the token goes stale
+
+Ring can invalidate a refresh token — a password change, a revoked session, or a long
+enough outage. That failure never recovers on its own, so the bridge treats it as its own
+condition rather than as an endless reconnect loop:
+
+- **At startup** the CLI stops with `Ring rejected the stored refresh token. Run
+  ring-bridge login to sign in again.`
+- **While running** streams keep serving the placeholder, the log says what happened, and
+  the dashboard shows a red banner linking to the sign-in form.
+
+Signing in again from the dashboard writes the new token and, if you leave *restart the
+bridge after signing in* ticked, exits cleanly so your process supervisor brings it back
+with the new credentials. Under systemd (`Restart=always`) or Docker
+(`restart: unless-stopped`) that is seamless; otherwise start it again yourself.
+
+The bridge distinguishes a dead token from an unreachable camera or a network blip, so it
+only asks you to log in when logging in is actually the fix.
+
+### A note on the dashboard login
+
+The sign-in form sends your Ring password to the bridge over **plain HTTP**. On a trusted
+LAN that is usually fine, but if it is not:
+
+- Use `ring-bridge login` on the machine itself, over SSH.
+- Or reach the dashboard through an HTTPS reverse proxy.
+
+The login endpoints always require the admin token as a header, so they are never
+reachable by a cross-site request even when a browser has a session cookie.
 
 ## On-demand connections
 
