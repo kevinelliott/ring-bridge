@@ -20,6 +20,7 @@ import { logBus, type LogEntry } from './log-bus.ts'
 import type { RingEventCollector, RingEventRecord } from './ring-events.ts'
 import type { ContinuousPublisher, OutputStats } from './continuous-publisher.ts'
 import type { BridgeConfig, CameraSettings } from './config.ts'
+import { LoginSession, saveRefreshToken } from './ring-login.ts'
 import { renderMetrics } from './metrics.ts'
 
 const projectRoot = dirname(fileURLToPath(import.meta.url))
@@ -28,6 +29,8 @@ const UI_PATH = join(projectRoot, 'public', 'index.html')
 const MJPEG_FPS = 5
 /** JPEG end-of-image marker, used to split the MJPEG stream into frames. */
 const JPEG_EOI = Buffer.from([0xff, 0xd9])
+/** Ring's 2FA challenge does not stay valid long; do not hold a slot past this. */
+const LOGIN_TTL_MS = 5 * 60 * 1000
 
 export interface OutputStatus extends OutputStats {
   path: string
@@ -60,6 +63,8 @@ export interface BridgeStatus {
   cameras: CameraStatus[]
   events: { lastRefreshAt: number; error?: string; count: number }
   mqtt: { enabled: boolean; connected: boolean; error?: string }
+  /** 'stale' means Ring rejected the stored token and a new login is needed. */
+  auth: { state: 'ok' | 'stale'; detail?: string }
 }
 
 export interface ApplyResult {
@@ -80,6 +85,8 @@ export interface AdminContext {
   talk(path: string, audioPath: string): Promise<{ error?: string }>
   events: RingEventCollector
   refreshEvents(): Promise<void>
+  /** Called after a successful re-login so the bridge can pick up the token. */
+  onReauthenticated(restart: boolean): void
 }
 
 interface SseClient {
@@ -92,6 +99,11 @@ export class AdminServer {
   private readonly clients = new Set<SseClient>()
   private server?: ReturnType<typeof createServer>
   private uiCache?: string
+  /**
+   * A login in progress. Ring ties the 2FA code to the client that requested
+   * it, so the same session must serve both steps -- and only one at a time.
+   */
+  private login?: { session: LoginSession; startedAt: number }
   /** One shared JPEG encoder per camera, alive while viewers are watching. */
   private readonly mjpeg = new Map<string, MjpegSession>()
 
@@ -313,6 +325,54 @@ export class AdminServer {
       return
     }
 
+    if (path === '/api/login/start' || path === '/api/login/code') {
+      // Credentials and the resulting token are the crown jewels here, so this
+      // is header-auth only: never reachable by a cross-site request, and
+      // never authorised by a cookie the browser attaches automatically.
+      if (req.method !== 'POST' || !this.authorized(req, false)) {
+        this.json(res, req.method === 'POST' ? 401 : 405, { error: 'not allowed' })
+        return
+      }
+
+      let body: { email?: string; password?: string; code?: string; restart?: boolean }
+      try {
+        body = JSON.parse((await readBody(req)) || '{}')
+      } catch {
+        this.json(res, 400, { error: 'body must be JSON' })
+        return
+      }
+
+      try {
+        if (path === '/api/login/start') {
+          const session = new LoginSession()
+          const start = await session.begin(body.email ?? '', body.password ?? '')
+          if (start.refreshToken) {
+            this.login = undefined
+            this.finishLogin(res, start.refreshToken, body.restart ?? false)
+            return
+          }
+          this.login = { session, startedAt: Date.now() }
+          this.json(res, 200, { needsTwoFactor: true, prompt: start.prompt })
+          return
+        }
+
+        // Ring expires the challenge quickly; a stale slot means start over.
+        if (!this.login || Date.now() - this.login.startedAt > LOGIN_TTL_MS) {
+          this.login = undefined
+          this.json(res, 410, { error: 'that login expired — start again' })
+          return
+        }
+        const token = await this.login.session.submitCode(body.code ?? '')
+        this.login = undefined
+        this.finishLogin(res, token, body.restart ?? false)
+      } catch (error) {
+        this.json(res, 400, {
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+      return
+    }
+
     if (path.startsWith('/api/talk/')) {
       // Mutating and physically audible at the camera, so header auth only.
       if (req.method !== 'POST' || !this.authorized(req, false)) {
@@ -387,6 +447,18 @@ export class AdminServer {
    * camera and torn down when the last one leaves, so an unwatched dashboard
    * costs nothing.
    */
+  private finishLogin(res: ServerResponse, token: string, restart: boolean): void {
+    const path = saveRefreshToken(token)
+    console.log(`[auth] new refresh token saved to ${path} via the dashboard`)
+    this.json(res, 200, { ok: true, savedTo: path, restarting: restart })
+    // Respond first: the process may be about to exit.
+    if (restart) {
+      setTimeout(() => this.context.onReauthenticated(true), 250)
+    } else {
+      this.context.onReauthenticated(false)
+    }
+  }
+
   private serveMjpeg(cameraPath: string, res: ServerResponse): void {
     const publisher = this.context.getPublisher(cameraPath)
     if (!publisher) {

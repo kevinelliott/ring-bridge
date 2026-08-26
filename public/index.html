@@ -121,6 +121,13 @@
 </nav>
 
 <main>
+  <div class="note" id="authBanner" style="display:none; border-left-color: var(--err); max-width:640px">
+    <strong style="color:var(--err)">Ring rejected the stored refresh token.</strong>
+    <div id="authDetail" style="margin:6px 0"></div>
+    Streams keep serving the placeholder until you sign in again.
+    <button class="btn" id="authGo" style="margin-top:10px">Sign in to Ring</button>
+  </div>
+
   <div class="note" id="lockBanner" style="display:none; border-left-color: var(--err); max-width:620px">
     This bridge requires an admin token. Enter it to load data:
     <div style="display:flex; gap:8px; margin-top:10px">
@@ -162,6 +169,32 @@
   </section>
 
   <section id="config">
+    <div class="form" style="margin-bottom:20px">
+      <h3 style="margin:0 0 4px; font-size:14px">Ring account</h3>
+      <p class="hint" id="ringAuthState">–</p>
+      <div id="loginStep1">
+        <div class="row"><label>Email</label><input id="liEmail" type="email" autocomplete="off"></div>
+        <div class="row"><label>Password</label><input id="liPass" type="password" autocomplete="off"></div>
+        <button class="btn primary" id="liGo">Sign in</button>
+      </div>
+      <div id="loginStep2" style="display:none">
+        <p class="hint" id="liPrompt"></p>
+        <div class="row"><label>Verification code</label><input id="liCode" inputmode="numeric" autocomplete="one-time-code"></div>
+        <button class="btn primary" id="liCodeGo">Verify</button>
+        <button class="btn" id="liCancel">Cancel</button>
+      </div>
+      <label class="check" style="margin-top:12px">
+        <input type="checkbox" id="liRestart" checked> restart the bridge after signing in
+      </label>
+      <p class="hint" style="margin-top:6px">
+        Your password is used once to obtain a refresh token and is never stored.
+        The bridge keeps the token current on its own from then on.
+        Restarting is how the running process picks up a new token — under systemd
+        or Docker it comes straight back.
+      </p>
+      <div id="liMsg" style="margin-top:8px"></div>
+    </div>
+
     <div class="form">
       <div class="note" id="authNote" style="display:none">
         This bridge requires an admin token for changes. Enter it below.
@@ -339,6 +372,15 @@ function renderStatus(s) {
     pin.disabled = cam.alwaysOn;
   }
 
+  if (s.auth) {
+    const stale = s.auth.state === 'stale';
+    $('authBanner').style.display = stale ? 'block' : 'none';
+    if (stale) $('authDetail').textContent = s.auth.detail || '';
+    $('ringAuthState').textContent = stale
+      ? 'Token rejected by Ring — sign in again below.'
+      : 'Signed in. The refresh token is valid and kept current automatically.';
+    $('ringAuthState').style.color = stale ? 'var(--err)' : 'var(--muted)';
+  }
   if (s.mqtt?.enabled) {
     $('mqttPill').style.display = '';
     $('mqttPill').innerHTML =
@@ -499,6 +541,86 @@ $('cfgSave').onclick = async () => {
   msg.textContent = `Saved to ${d.configPath.split('/').pop()}`;
   await loadConfig();
 };
+
+/* ---------- ring login ---------- */
+function showLoginStep(two) {
+  $('loginStep1').style.display = two ? 'none' : '';
+  $('loginStep2').style.display = two ? '' : 'none';
+}
+function liSay(text, colour) {
+  $('liMsg').textContent = text;
+  $('liMsg').style.color = colour;
+}
+
+$('authGo').onclick = () => {
+  document.querySelector('nav button[data-tab=config]').click();
+  $('liEmail').focus();
+};
+
+$('liGo').onclick = async () => {
+  const email = $('liEmail').value.trim(), password = $('liPass').value;
+  if (!email || !password) { liSay('Email and password are both required.', 'var(--err)'); return; }
+  liSay('Signing in…', 'var(--muted)');
+  $('liGo').disabled = true;
+  try {
+    const r = await fetch('/api/login/start', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ email, password, restart: $('liRestart').checked }),
+    });
+    const d = await r.json();
+    // Clear it either way: the password is needed exactly once, so there is no
+    // reason to leave it sitting in the DOM after the request has gone.
+    $('liPass').value = '';
+    if (!r.ok) { liSay(d.error || 'sign-in failed', 'var(--err)'); return; }
+    if (d.needsTwoFactor) {
+      $('liPrompt').textContent = d.prompt || 'Ring sent a verification code.';
+      showLoginStep(true);
+      liSay('', 'var(--muted)');
+      $('liCode').focus();
+    } else {
+      loginDone(d);
+    }
+  } catch (e) {
+    liSay(String(e), 'var(--err)');
+  } finally {
+    $('liGo').disabled = false;
+  }
+};
+
+$('liCodeGo').onclick = async () => {
+  const code = $('liCode').value.trim();
+  liSay('Verifying…', 'var(--muted)');
+  $('liCodeGo').disabled = true;
+  try {
+    const r = await fetch('/api/login/code', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ code, restart: $('liRestart').checked }),
+    });
+    const d = await r.json();
+    if (!r.ok) { liSay(d.error || 'verification failed', 'var(--err)'); return; }
+    loginDone(d);
+  } catch (e) {
+    liSay(String(e), 'var(--err)');
+  } finally {
+    $('liCodeGo').disabled = false;
+  }
+};
+
+$('liCancel').onclick = () => { showLoginStep(false); $('liCode').value = ''; liSay('', 'var(--muted)'); };
+
+function loginDone(d) {
+  showLoginStep(false);
+  $('liCode').value = '';
+  $('authBanner').style.display = 'none';
+  liSay(
+    d.restarting
+      ? `Signed in. Token saved; the bridge is restarting — this page will reconnect.`
+      : `Signed in. Token saved to ${d.savedTo}. Restart the bridge to use it.`,
+    'var(--ok)',
+  );
+}
 
 /* ---------- live stream ---------- */
 function connect() {

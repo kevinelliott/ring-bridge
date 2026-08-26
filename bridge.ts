@@ -16,6 +16,7 @@ import { RingApi, type RingCamera } from 'ring-client-api'
 import type { StreamingSession } from 'ring-client-api/streaming/streaming-session'
 import { firstValueFrom } from 'rxjs'
 import { loadRefreshToken, persistRefreshTokenUpdates } from './ring-auth.ts'
+import { isAuthError } from './ring-login.ts'
 import { RtspServer } from './rtsp-server.ts'
 import { ContinuousPublisher, type OutputSettings } from './continuous-publisher.ts'
 import { AdminServer } from './admin-server.ts'
@@ -118,7 +119,37 @@ export async function runBridge(options: RunOptions): Promise<void> {
   const ringApi = new RingApi({ refreshToken: loadRefreshToken() })
   const stopPersistingToken = persistRefreshTokenUpdates(ringApi)
 
-  const locations = await ringApi.getLocations()
+  /**
+   * Ring rejecting the stored token is a distinct failure from a camera being
+   * unreachable: it never recovers on its own and needs a human to log in. It
+   * is tracked separately so the dashboard can say so instead of showing an
+   * endless reconnect loop.
+   */
+  const auth: { state: 'ok' | 'stale'; detail?: string } = { state: 'ok' }
+  const noteAuthFailure = (error: unknown): void => {
+    if (!isAuthError(error) || auth.state === 'stale') {
+      return
+    }
+    auth.state = 'stale'
+    auth.detail = error instanceof Error ? error.message : String(error)
+    console.error(
+      '[auth] Ring rejected the stored refresh token. Streams will show the ' +
+        'placeholder until you log in again: run `ring-bridge login`, or use ' +
+        'the dashboard.',
+    )
+  }
+
+  let locations
+  try {
+    locations = await ringApi.getLocations()
+  } catch (error) {
+    if (isAuthError(error)) {
+      throw new Error(
+        'Ring rejected the stored refresh token. Run `ring-bridge login` to sign in again.',
+      )
+    }
+    throw error
+  }
   const allCameras = locations.flatMap((location) => location.cameras)
   const filter = options.overrides.cameraFilter ?? []
 
@@ -269,6 +300,22 @@ export async function runBridge(options: RunOptions): Promise<void> {
     ? await startAdmin({
         config, configPath: options.configPath, runtimes, server,
         eventCollector, startedAt, mqtt,
+        authState: () => ({ ...auth }),
+        onReauthenticated: (restart) => {
+          auth.state = 'ok'
+          auth.detail = undefined
+          if (restart) {
+            // The RingApi holds the old token internally, so a clean exit and
+            // a supervisor restart is the honest way to pick up the new one.
+            console.log('[auth] restarting to pick up the new refresh token')
+            for (const runtime of runtimes) {
+              runtime.publisher.stop()
+            }
+            server.close()
+            ringApi.disconnect()
+            process.exit(0)
+          }
+        },
       })
     : undefined
 
@@ -292,7 +339,9 @@ export async function runBridge(options: RunOptions): Promise<void> {
     })
   }
 
-  await Promise.all(runtimes.map((runtime) => superviseCamera(runtime, shouldStop)))
+  await Promise.all(
+    runtimes.map((runtime) => superviseCamera(runtime, shouldStop, noteAuthFailure)),
+  )
 
   for (const runtime of runtimes) {
     runtime.publisher.stop()
@@ -333,6 +382,7 @@ function applyOverrides(config: BridgeConfig, o: CliOverrides): void {
 async function superviseCamera(
   runtime: CameraRuntime,
   shouldStop: () => boolean,
+  onError?: (error: unknown) => void,
 ): Promise<void> {
   const { camera, publisher, demand, settings } = runtime
   const label = `[${camera.name}]`
@@ -395,6 +445,7 @@ async function superviseCamera(
       console.log(`${label} Ring call ended after ${durationSec}s`)
     } catch (error) {
       console.error(`${label} Ring stream error: ${String(error)}`)
+      onError?.(error)
     } finally {
       session?.stop()
       runtime.session = undefined
@@ -469,6 +520,8 @@ async function startAdmin(deps: {
   eventCollector: RingEventCollector
   startedAt: number
   mqtt: MqttBridge
+  authState: () => { state: 'ok' | 'stale'; detail?: string }
+  onReauthenticated: (restart: boolean) => void
 }): Promise<AdminServer> {
   const { config, configPath, runtimes, server, eventCollector, startedAt } = deps
   const bySlug = new Map(runtimes.map((r) => [r.path, r]))
@@ -510,6 +563,7 @@ async function startAdmin(deps: {
           }),
           events: eventCollector.status,
           mqtt: deps.mqtt.status,
+          auth: deps.authState(),
         }
       },
       getConfig: () => config,
@@ -586,6 +640,7 @@ async function startAdmin(deps: {
       getRuntime: (path) => bySlug.get(path),
       events: eventCollector,
       refreshEvents: () => eventCollector.refresh(),
+      onReauthenticated: deps.onReauthenticated,
     },
     config.webToken,
   )
