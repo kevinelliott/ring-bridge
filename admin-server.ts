@@ -23,8 +23,13 @@ import type { BridgeConfig, CameraSettings } from './config.ts'
 import { LoginSession, saveRefreshToken } from './ring-login.ts'
 import { renderMetrics } from './metrics.ts'
 
-const projectRoot = dirname(fileURLToPath(import.meta.url))
-const UI_PATH = join(projectRoot, 'public', 'index.html')
+const moduleDir = dirname(fileURLToPath(import.meta.url))
+/**
+ * The dashboard is a package asset, so it stays module-relative. Running from
+ * source puts it alongside this file; running a build puts this file in dist/
+ * with the asset copied in beside it, so both resolve without a special case.
+ */
+const UI_PATH = join(moduleDir, 'public', 'index.html')
 /** Preview frame rate; low enough to stay cheap, high enough to look live. */
 const MJPEG_FPS = 5
 /** JPEG end-of-image marker, used to split the MJPEG stream into frames. */

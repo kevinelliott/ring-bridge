@@ -9,11 +9,14 @@
  * Camera keys are matched case-insensitively against the Ring camera name.
  */
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { dirname, join, resolve } from 'node:path'
+import { resolve } from 'node:path'
 
-const projectRoot = dirname(fileURLToPath(import.meta.url))
-export const DEFAULT_CONFIG_PATH = join(projectRoot, 'ring-bridge.config.json')
+/**
+ * Resolved against the working directory rather than the module, so an
+ * installed copy reads the config belonging to wherever it was run -- not one
+ * buried in node_modules.
+ */
+export const DEFAULT_CONFIG_PATH = resolve('ring-bridge.config.json')
 
 /** Encoder settings; every field is overridable per camera. */
 export interface StreamSettings {

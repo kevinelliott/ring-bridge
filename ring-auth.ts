@@ -1,10 +1,16 @@
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { resolve } from 'node:path'
 import type { RingApi } from 'ring-client-api'
 
-const projectRoot = dirname(fileURLToPath(import.meta.url))
-const ENV_PATH = join(projectRoot, '.env')
+/**
+ * Where the refresh token lives.
+ *
+ * Resolved against the working directory, not the module: once this package is
+ * installed globally the module directory is somewhere under node_modules, and
+ * writing a credential there would be both surprising and unwritable for a
+ * non-root user. RING_ENV_FILE overrides it for anyone who wants it elsewhere.
+ */
+const ENV_PATH = resolve(process.env.RING_ENV_FILE ?? '.env')
 const TOKEN_KEY = 'RING_REFRESH_TOKEN'
 
 /**

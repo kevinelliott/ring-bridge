@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "declaration": false,
+    "sourceMap": true,
+    // Emitted JS must import ./foo.js, not ./foo.ts. TypeScript rewrites the
+    // extensions for us, so the sources can keep importing .ts directly.
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": ["*.ts"],
+  "exclude": ["node_modules", "test", "dist"]
+}
