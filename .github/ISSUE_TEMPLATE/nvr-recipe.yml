@@ -1,0 +1,37 @@
+name: NVR recipe
+description: Share a working configuration for an NVR or viewer
+title: "[recipe] "
+labels: [documentation, recipe]
+body:
+  - type: input
+    id: software
+    attributes:
+      label: Software and version
+      placeholder: "Blue Iris 5.9.9.14"
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: The configuration that worked
+      description: Settings, or the config file section. Redact hostnames and tokens.
+      render: yaml
+    validations:
+      required: true
+  - type: textarea
+    id: gotchas
+    attributes:
+      label: Anything non-obvious
+      description: >
+        Settings that had to be off, options that were not where the docs said,
+        anything that cost you time.
+  - type: checkboxes
+    id: verified
+    attributes:
+      label: What you verified
+      options:
+        - label: Video plays
+        - label: Audio plays
+        - label: Recording works
+        - label: Motion detection works
+        - label: It survives a Ring reconnect
