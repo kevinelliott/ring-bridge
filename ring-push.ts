@@ -6,12 +6,17 @@
  * then PATCHes the account's device record with the new token. That is how the
  * library delivers live doorbell and motion events.
  *
- * The cost is not obvious: Ring limits how many devices may be registered for
- * push on an account, and registering another one can push an existing
- * registration out. In practice that can mean the phone app and the chime stop
- * announcing events while the bridge runs -- a much worse trade than the
- * feature is worth, since a doorbell you cannot hear is the whole point of
- * owning one.
+ * The cost is that this occupies one of a limited number of push registrations
+ * on the account. Ring caps how many devices may be registered, so taking a
+ * slot on a full account evicts something else -- and that something can be the
+ * phone app or the chime. A doorbell you cannot hear is a bad trade for events
+ * arriving instantly rather than within a minute.
+ *
+ * It is one slot, not a growing list. The FCM credentials are stored in the
+ * refresh token as `pnc` and the device record is keyed by the token's stable
+ * hardware id, so repeated calls reuse the same registration rather than
+ * creating new ones -- provided the rotated token is persisted, which
+ * ring-auth does.
  *
  * Streaming does not need any of this. Video, audio, and reconnects all work
  * with push registration suppressed; only live event delivery is affected, and

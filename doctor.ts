@@ -96,6 +96,47 @@ async function checkToken(): Promise<Check> {
   }
 }
 
+/**
+ * Report whether this install holds a Ring push registration.
+ *
+ * It is one slot rather than a growing list, but Ring caps how many devices may
+ * be push-registered, so a slot taken here is a slot the phone or chime cannot
+ * have. Knowing whether one exists is the difference between "check Control
+ * Center" and "look elsewhere".
+ */
+function checkPushRegistration(pushEnabled: boolean): Check {
+  const token = process.env.RING_REFRESH_TOKEN
+  let registered = false
+  if (token) {
+    try {
+      registered = Boolean(
+        JSON.parse(Buffer.from(token, 'base64').toString('utf8')).pnc,
+      )
+    } catch {
+      // A plain token with no wrapper carries no push credentials.
+    }
+  }
+
+  if (!registered) {
+    return {
+      name: 'ring push',
+      status: 'ok',
+      detail: pushEnabled
+        ? 'not registered yet; enabling push will take one device slot'
+        : 'not registered — your phone and chime keep their slots',
+    }
+  }
+  return {
+    name: 'ring push',
+    status: pushEnabled ? 'ok' : 'warn',
+    detail: pushEnabled
+      ? 'registered and in use by this bridge'
+      : 'a registration exists from an earlier run. Push is off now, but the ' +
+        'slot is still taken — remove "ring-client-api" under Ring Control ' +
+        'Center > Authorized Client Devices to free it',
+  }
+}
+
 async function checkEncoder(configured: string): Promise<Check[]> {
   const checks: Check[] = []
   const available = await listEncoders()
@@ -173,6 +214,7 @@ export async function runDoctor(configPath: string): Promise<number> {
   checks.push(tokenCheck)
 
   const cameraCount = Number(/(\d+) camera/.exec(tokenCheck.detail)?.[1] ?? 1)
+  checks.push(checkPushRegistration(config.pushNotifications))
   checks.push(...(await checkEncoder(config.defaults.encoder)))
   checks.push(checkCpu(cameraCount))
 

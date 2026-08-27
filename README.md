@@ -219,8 +219,13 @@ is why — and it is fixed by default now.**
 locations, using the Ring *Android app's* credentials, then attaches the token to your
 account's device record. Ring
 [limits how many devices may be registered for push](https://github.com/dgreif/ring/wiki/Notification-Troubleshooting),
-so adding another one can displace an existing registration — and the casualty can be
-your phone or your chime.
+so taking a slot on a full account evicts something else — and that something can be your
+phone or your chime.
+
+To be precise about the scale: this is **one** registration, not a growing list. The
+Firebase credentials are stored in the refresh token as `pnc`, and the device record is
+keyed by the token's stable hardware id, so restarts and repeated calls reuse the same
+registration. The problem is occupying a slot at all when you have none spare.
 
 The bridge therefore **does not register for push by default.** Streaming is completely
 unaffected: video, audio, and reconnects all work without it. Only *live* event delivery
