@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   loadConfig, saveConfig, settingsFor, parseSize, validateSettings,
-  BUILT_IN_DEFAULTS,
+  validateSubstream, BUILT_IN_DEFAULTS,
 } from '../config.ts'
 
 const dir = mkdtempSync(join(tmpdir(), 'ring-bridge-test-'))
@@ -85,4 +85,56 @@ test('validateSettings rejects shell-ish encoder and preset values', () => {
   assert.match(String(validateSettings({ crf: 99 })), /between 0 and 51/)
   assert.match(String(validateSettings({ fps: 0 })), /between 1 and 60/)
   assert.match(String(validateSettings({ bitrateKbps: 5 })), /at least 100/)
+})
+
+test('substream validation matches the encoder constraints', () => {
+  assert.equal(validateSubstream(undefined), undefined, 'absent is fine')
+  assert.equal(validateSubstream(null), undefined, 'null clears it')
+  assert.equal(
+    validateSubstream({ width: 640, height: 360, fps: 5, crf: 28 }),
+    undefined,
+  )
+  // yuv420p again: odd dimensions have no valid chroma layout.
+  assert.match(String(validateSubstream({ width: 641, height: 360 })), /even/)
+  assert.match(String(validateSubstream({ width: 640 })), /both width and height/)
+  assert.match(String(validateSubstream({ width: 16, height: 16 })), /at least/)
+  assert.match(
+    String(validateSubstream({ width: 640, height: 360, fps: 99 })), /between 1 and 60/,
+  )
+  assert.match(
+    String(validateSubstream({ width: 640, height: 360, crf: 99 })), /between 0 and 51/,
+  )
+})
+
+test('a camera substream survives a save/load round trip', () => {
+  const path = join(dir, 'sub.json')
+  const config = loadConfig(join(dir, 'missing.json'))
+  config.cameras['Front Door'] = {
+    substream: { width: 640, height: 360, fps: 5, crf: 28 },
+  }
+  saveConfig(path, config)
+
+  const settings = settingsFor(loadConfig(path), 'Front Door')
+  assert.equal(settings.substream?.width, 640)
+  assert.equal(settings.substream?.fps, 5)
+  // Not inherited by cameras that did not ask for one.
+  assert.equal(settingsFor(loadConfig(path), 'Other').substream, undefined)
+})
+
+test('new top-level options load, and default sensibly when absent', () => {
+  const bare = loadConfig(join(dir, 'missing.json'))
+  assert.equal(bare.publicSnapshots, false, 'snapshots are opt-in')
+  assert.equal(bare.tlsCert, undefined)
+  assert.ok(bare.cameraRefreshSec > 0)
+
+  const path = write('opts.json', {
+    publicSnapshots: true,
+    tlsCert: '/tmp/c.pem',
+    tlsKey: '/tmp/k.pem',
+    cameraRefreshSec: 120,
+  })
+  const config = loadConfig(path)
+  assert.equal(config.publicSnapshots, true)
+  assert.equal(config.tlsCert, '/tmp/c.pem')
+  assert.equal(config.cameraRefreshSec, 120)
 })
