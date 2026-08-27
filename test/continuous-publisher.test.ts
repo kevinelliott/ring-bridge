@@ -124,13 +124,36 @@ test('markSourceDown clears buffers so stale audio cannot replay', () => {
   assert.ok(drainAudio(p).every((b) => b === 0), 'silence, not the old audio')
 })
 
-test('a desynced decoder resets rather than growing without bound', () => {
+test('reassembly memory is fixed regardless of how much arrives', () => {
   const p = makePublisher(20)
   const bytes = frameSize(W, H)
-  // Garbage that never aligns to a frame boundary.
-  p.pushDecoderChunk(Buffer.alloc(bytes * 5 + 7, 0x22))
-  const internals = p as unknown as { pending: Buffer }
-  assert.ok(internals.pending.length < bytes * 5, 'buffer did not run away')
+  const internals = p as unknown as { assembling: Buffer; ring: Buffer[] }
+  const before = internals.assembling.length + internals.ring.length * bytes
+
+  // Far more than a frame, at an offset that never aligns -- the old
+  // concat-based reassembly would have grown a buffer here.
+  for (let i = 0; i < 20; i++) {
+    p.pushDecoderChunk(Buffer.alloc(bytes * 2 + 7, 0x22))
+  }
+
+  const after = internals.assembling.length + internals.ring.length * bytes
+  assert.equal(after, before, 'footprint is constant')
+  assert.equal(internals.assembling.length, bytes, 'never grows past one frame')
+})
+
+test('a published frame is not overwritten by the next one', () => {
+  const p = makePublisher(20)
+  const bytes = frameSize(W, H)
+
+  p.pushDecoderChunk(Buffer.alloc(bytes, 0xaa))
+  const first = p.currentFrame()
+  assert.equal(first?.frame[0], 0xaa)
+
+  // Reusing buffers is only safe if the frame just handed out survives the
+  // next one being assembled.
+  p.pushDecoderChunk(Buffer.alloc(bytes, 0xbb))
+  assert.equal(first?.frame[0], 0xaa, 'the earlier copy is intact')
+  assert.equal(p.currentFrame()?.frame[0], 0xbb, 'and the new frame is current')
 })
 
 test('substream outputs get their own frame rate from one source', () => {

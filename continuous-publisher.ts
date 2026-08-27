@@ -108,6 +108,8 @@ const MAX_AUDIO_BUFFER_MS = 400
 const MAX_QUEUE_MS = 1500
 /** Window for the measured-fps figure shown on the dashboard. */
 const RATE_WINDOW_MS = 5_000
+/** Reusable frame buffers: one publishing, one filling. */
+const RING_SIZE = 2
 
 interface Output {
   settings: OutputSettings
@@ -133,7 +135,19 @@ export class ContinuousPublisher {
   private clock?: NodeJS.Timeout
   private stopped = false
 
-  private pending: Buffer = Buffer.alloc(0)
+  /**
+   * Frame reassembly without per-chunk allocation.
+   *
+   * Decoder output arrives in arbitrary chunks, so the obvious approach
+   * concatenates until a frame's worth exists -- which allocates and copies a
+   * multi-megabyte buffer several times per frame, at 20fps, forever. Instead
+   * chunks are copied straight into a preallocated frame, and completed frames
+   * are handed to a small ring of reusable buffers.
+   */
+  private assembling: Buffer
+  private assembled = 0
+  private readonly ring: Buffer[] = []
+  private ringIndex = 0
   private latestFrame?: Buffer
   private lastFrameAt = 0
 
@@ -155,6 +169,12 @@ export class ContinuousPublisher {
   constructor(options: PublisherOptions) {
     this.options = options
     this.bytesPerFrame = frameSize(options.sourceWidth, options.sourceHeight)
+    this.assembling = Buffer.allocUnsafe(this.bytesPerFrame)
+    // Two buffers is enough: one being published, one being filled. A third
+    // would only cover a case where the clock reads a frame it already sent.
+    for (let i = 0; i < RING_SIZE; i++) {
+      this.ring.push(Buffer.allocUnsafe(this.bytesPerFrame))
+    }
     this.sprite = buildSpinner(options.sourceWidth, options.sourceHeight)
     this.silence = Buffer.alloc(
       Math.ceil(options.sampleRate / options.sourceFps) * BYTES_PER_SAMPLE,
@@ -199,20 +219,26 @@ export class ContinuousPublisher {
    * are accumulated and split at exact frame size.
    */
   pushDecoderChunk(chunk: Buffer): void {
-    this.pending =
-      this.pending.length === 0 ? chunk : Buffer.concat([this.pending, chunk])
+    let offset = 0
 
-    while (this.pending.length >= this.bytesPerFrame) {
-      this.latestFrame = this.pending.subarray(0, this.bytesPerFrame)
-      this.pending = this.pending.subarray(this.bytesPerFrame)
-      this.lastFrameAt = Date.now()
-    }
+    while (offset < chunk.length) {
+      const wanted = this.bytesPerFrame - this.assembled
+      const taking = Math.min(wanted, chunk.length - offset)
+      chunk.copy(this.assembling, this.assembled, offset, offset + taking)
+      this.assembled += taking
+      offset += taking
 
-    if (this.pending.length > this.bytesPerFrame * 4) {
-      console.error(
-        `${this.options.label} decoder output desynced, resetting buffer`,
-      )
-      this.pending = Buffer.alloc(0)
+      if (this.assembled === this.bytesPerFrame) {
+        // Swap the completed frame with a ring buffer, so the frame just
+        // published is not the one being overwritten next.
+        const completed = this.assembling
+        this.assembling = this.ring[this.ringIndex] as Buffer
+        this.ring[this.ringIndex] = completed
+        this.ringIndex = (this.ringIndex + 1) % this.ring.length
+        this.assembled = 0
+        this.latestFrame = completed
+        this.lastFrameAt = Date.now()
+      }
     }
   }
 
@@ -235,7 +261,7 @@ export class ContinuousPublisher {
   /** Called when a Ring session ends so the spinner appears without waiting. */
   markSourceDown(): void {
     this.lastFrameAt = 0
-    this.pending = Buffer.alloc(0)
+    this.assembled = 0
     this.audioPending = Buffer.alloc(0)
   }
 
@@ -435,7 +461,11 @@ export class ContinuousPublisher {
       this.options.sourceHeight = next.height as number
       this.bytesPerFrame = frameSize(this.options.sourceWidth, this.options.sourceHeight)
       this.sprite = buildSpinner(this.options.sourceWidth, this.options.sourceHeight)
-      this.pending = Buffer.alloc(0)
+      this.assembling = Buffer.allocUnsafe(this.bytesPerFrame)
+      this.assembled = 0
+      for (let i = 0; i < this.ring.length; i++) {
+        this.ring[i] = Buffer.allocUnsafe(this.bytesPerFrame)
+      }
       this.latestFrame = undefined
       this.lastFrameAt = 0
     }
