@@ -25,6 +25,7 @@ import { logBus } from './log-bus.ts'
 import { DemandTracker } from './demand.ts'
 import { MqttBridge } from './mqtt-bridge.ts'
 import { WebhookSender } from './webhooks.ts'
+import { OnvifService } from './onvif.ts'
 import {
   loadConfig, saveConfig, settingsFor, validateSettings, validateSubstream,
   type BridgeConfig, type CameraSettings,
@@ -52,6 +53,7 @@ export interface CliOverrides extends Partial<CameraSettings> {
   tlsCert?: string
   tlsKey?: string
   publicSnapshots?: boolean
+  onvifPort?: number
   cameraFilter?: string[]
 }
 
@@ -282,6 +284,32 @@ export async function runBridge(options: RunOptions): Promise<void> {
     )
   }
 
+  // ONVIF is how Synology and Blue Iris prefer to find a camera; without it
+  // they need a hand-typed RTSP path.
+  const onvif = config.onvifPort > 0
+    ? new OnvifService({
+        port: config.onvifPort,
+        rtspPort: config.rtspPort,
+        snapshotPort: config.publicSnapshots ? config.webPort : undefined,
+        cameras: () => runtimes.map((r) => ({
+          name: r.camera.name,
+          path: r.path,
+          width: r.settings.width,
+          height: r.settings.height,
+          fps: r.settings.fps,
+          ...(r.settings.substream
+            ? {
+                substreamPath: `${r.path}_sub`,
+                substreamWidth: r.settings.substream.width,
+                substreamHeight: r.settings.substream.height,
+                substreamFps: r.settings.substream.fps,
+              }
+            : {}),
+        })),
+      })
+    : undefined
+  await onvif?.start()
+
   const eventCollector = new RingEventCollector(cameras)
   eventCollector.start()
   void eventCollector.refresh().catch(() => {})
@@ -382,6 +410,7 @@ export async function runBridge(options: RunOptions): Promise<void> {
         runtime.publisher.stop()
       }
       admin?.close()
+      onvif?.stop()
       eventCollector.stop()
       void mqtt.stop()
       server.close()
@@ -399,6 +428,7 @@ export async function runBridge(options: RunOptions): Promise<void> {
     runtime.publisher.stop()
   }
   admin?.close()
+  onvif?.stop()
   eventCollector.stop()
   await mqtt.stop()
   server.close()
@@ -415,6 +445,7 @@ function applyOverrides(config: BridgeConfig, o: CliOverrides): void {
   if (o.tlsCert !== undefined) config.tlsCert = o.tlsCert
   if (o.tlsKey !== undefined) config.tlsKey = o.tlsKey
   if (o.publicSnapshots) config.publicSnapshots = true
+  if (o.onvifPort !== undefined) config.onvifPort = o.onvifPort
 
   // Encoder overrides land on defaults, so they apply to every camera unless a
   // per-camera entry in the config file says otherwise.

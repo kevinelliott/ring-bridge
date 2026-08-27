@@ -46,6 +46,7 @@ Run options:
   --tls-cert <path>  Serve the dashboard over HTTPS (with --tls-key)
   --tls-key <path>   Private key for --tls-cert
   --public-snapshots Serve /snapshot/<camera>.jpg without the admin token
+  --onvif-port <n>   Enable ONVIF discovery on this port (0 disables)
 
 Test options:
   -n, --seconds <n>  Capture length (default 10)
@@ -124,6 +125,7 @@ function parse(argv: string[]): ParsedArgs {
       case '--tls-cert': o.tlsCert = next(); break
       case '--tls-key': o.tlsKey = next(); break
       case '--public-snapshots': o.publicSnapshots = true; break
+      case '--onvif-port': o.onvifPort = Number(next()); break
       case '--json': out.json = true; break
       case '-n': case '--seconds': out.testSeconds = Number(next()); break
       case '--keep': out.testKeep = next(); break

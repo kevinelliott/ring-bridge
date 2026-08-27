@@ -79,6 +79,11 @@ export interface BridgeConfig {
   publicSnapshots: boolean
   /** Seconds between checks for cameras added or removed in the Ring app. */
   cameraRefreshSec: number
+  /**
+   * ONVIF port, so NVRs that discover cameras rather than accepting a URL can
+   * find the bridge. 0 disables it.
+   */
+  onvifPort: number
   logFile?: string
   webhookUrl?: string
   mqtt: MqttConfig
@@ -93,6 +98,7 @@ export const BUILT_IN_DEFAULTS: BridgeConfig = {
   webBind: '0.0.0.0',
   publicSnapshots: false,
   cameraRefreshSec: 900,
+  onvifPort: 0,
   mqtt: {
     topicPrefix: 'ring-bridge',
     discoveryPrefix: 'homeassistant',
@@ -171,6 +177,7 @@ export function loadConfig(path: string): BridgeConfig {
   if (typeof parsed.cameraRefreshSec === 'number') {
     config.cameraRefreshSec = parsed.cameraRefreshSec
   }
+  if (typeof parsed.onvifPort === 'number') config.onvifPort = parsed.onvifPort
   if (typeof parsed.logFile === 'string') config.logFile = parsed.logFile
   if (typeof parsed.webhookUrl === 'string') config.webhookUrl = parsed.webhookUrl
 
