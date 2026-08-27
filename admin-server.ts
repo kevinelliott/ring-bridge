@@ -8,6 +8,8 @@
  * its own without any client-side plumbing.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { createServer as createHttpsServer } from 'node:https'
+import { readFileSync } from 'node:fs'
 import { readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { randomBytes } from 'node:crypto'
@@ -36,6 +38,8 @@ const MJPEG_FPS = 5
 const JPEG_EOI = Buffer.from([0xff, 0xd9])
 /** Ring's 2FA challenge does not stay valid long; do not hold a slot past this. */
 const LOGIN_TTL_MS = 5 * 60 * 1000
+/** Upper bound on a talk-to-speaker upload. */
+const MAX_AUDIO_BYTES = 8 * 1024 * 1024
 
 export interface OutputStatus extends OutputStats {
   path: string
@@ -70,6 +74,8 @@ export interface BridgeStatus {
   mqtt: { enabled: boolean; connected: boolean; error?: string }
   /** 'stale' means Ring rejected the stored token and a new login is needed. */
   auth: { state: 'ok' | 'stale'; detail?: string }
+  /** Cameras added or removed in Ring since this process started. */
+  cameraChanges: { added: string[]; removed: number }
 }
 
 export interface ApplyResult {
@@ -98,11 +104,21 @@ interface SseClient {
   res: ServerResponse
 }
 
+export interface AdminOptions {
+  tlsCert?: string
+  tlsKey?: string
+  /** Serve /snapshot/<camera>.jpg without the admin token. */
+  publicSnapshots?: boolean
+}
+
 export class AdminServer {
   private readonly context: AdminContext
   private readonly token?: string
+  private readonly options: AdminOptions
+  /** True when serving over HTTPS, so callers can print the right URL. */
+  secure = false
   private readonly clients = new Set<SseClient>()
-  private server?: ReturnType<typeof createServer>
+  private server?: ReturnType<typeof createServer> | ReturnType<typeof createHttpsServer>
   private uiCache?: string
   /**
    * A login in progress. Ring ties the 2FA code to the client that requested
@@ -112,19 +128,31 @@ export class AdminServer {
   /** One shared JPEG encoder per camera, alive while viewers are watching. */
   private readonly mjpeg = new Map<string, MjpegSession>()
 
-  constructor(context: AdminContext, token?: string) {
+  constructor(context: AdminContext, token?: string, options: AdminOptions = {}) {
     this.context = context
     this.token = token
+    this.options = options
   }
 
   async listen(port: number, host: string): Promise<void> {
-    const server = createServer((req, res) => {
+    const handler = (req: IncomingMessage, res: ServerResponse): void => {
       this.handle(req, res).catch((error) => {
         if (!res.headersSent) {
           this.json(res, 500, { error: String(error) })
         }
       })
-    })
+    }
+
+    // HTTPS matters here specifically because the dashboard's Ring sign-in
+    // form carries a password.
+    const { tlsCert, tlsKey } = this.options
+    const server = tlsCert && tlsKey
+      ? createHttpsServer(
+          { cert: readFileSync(tlsCert), key: readFileSync(tlsKey) },
+          handler,
+        )
+      : createServer(handler)
+    this.secure = Boolean(tlsCert && tlsKey)
     this.server = server
 
     await new Promise<void>((resolve, reject) => {
@@ -230,6 +258,27 @@ export class AdminServer {
         'cache-control': 'no-store',
       })
       res.end(this.uiCache)
+      return
+    }
+
+    // Opt-in still images for NVRs and integrations that want a snapshot URL
+    // rather than a stream. Deliberately outside the auth gate, which is why
+    // it is off unless explicitly enabled.
+    if (this.options.publicSnapshots && path.startsWith('/snapshot/')) {
+      const name = decodeURIComponent(path.slice('/snapshot/'.length))
+        .replace(/\.jpe?g$/i, '')
+      const current = this.context.getPublisher(name)?.currentFrame()
+      if (!current) {
+        this.json(res, 404, { error: 'unknown camera or no frame yet' })
+        return
+      }
+      const jpeg = await frameToJpeg(current.frame, current.width, current.height)
+      res.writeHead(200, {
+        'content-type': 'image/jpeg',
+        'cache-control': 'no-store',
+        'content-length': jpeg.length,
+      })
+      res.end(jpeg)
       return
     }
 
@@ -384,6 +433,15 @@ export class AdminServer {
         this.json(res, req.method === 'POST' ? 401 : 405, { error: 'not allowed' })
         return
       }
+      // Reject on the declared length first: destroying the socket mid-upload
+      // leaves the client with a broken connection rather than an error it can
+      // report.
+      const declared = Number(req.headers['content-length'] ?? 0)
+      if (declared > MAX_AUDIO_BYTES) {
+        this.json(res, 413, { error: 'audio must be under 8MB' })
+        return
+      }
+
       const camera = decodeURIComponent(path.slice('/api/talk/'.length))
       const temp = join(tmpdir(), `ring-talk-${randomBytes(6).toString('hex')}`)
       try {
@@ -404,7 +462,9 @@ export class AdminServer {
       const cameraName = decodeURIComponent(rest.slice(0, slash))
       const uuid = decodeURIComponent(rest.slice(slash + 1))
       const camera = this.context.events.byName.get(cameraName)
-      if (!camera || !/^[\w-]{8,64}$/.test(uuid)) {
+      // Match Ring's actual uuid shape rather than "wordish characters", so
+      // malformed input fails here instead of as a confusing 502 from Ring.
+      if (!camera || !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(uuid)) {
         this.json(res, 404, { error: 'unknown event snapshot' })
         return
       }
@@ -628,7 +688,7 @@ function readBinaryBody(req: IncomingMessage): Promise<Buffer> {
     let size = 0
     req.on('data', (chunk: Buffer) => {
       size += chunk.length
-      if (size > 8 * 1024 * 1024) {
+      if (size > MAX_AUDIO_BYTES) {
         reject(new Error('audio must be under 8MB'))
         req.destroy()
         return

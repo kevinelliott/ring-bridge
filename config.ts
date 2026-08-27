@@ -68,6 +68,17 @@ export interface BridgeConfig {
   webPort: number
   webBind: string
   webToken?: string
+  /** Paths to a TLS certificate and key; both required to enable HTTPS. */
+  tlsCert?: string
+  tlsKey?: string
+  /**
+   * Serve stills at /snapshot/<camera>.jpg without the admin token, for NVRs
+   * and integrations that want a still-image URL. Off by default: it exposes
+   * camera images to anyone who can reach the port.
+   */
+  publicSnapshots: boolean
+  /** Seconds between checks for cameras added or removed in the Ring app. */
+  cameraRefreshSec: number
   logFile?: string
   webhookUrl?: string
   mqtt: MqttConfig
@@ -80,6 +91,8 @@ export const BUILT_IN_DEFAULTS: BridgeConfig = {
   rtspPort: 8554,
   webPort: 8080,
   webBind: '0.0.0.0',
+  publicSnapshots: false,
+  cameraRefreshSec: 900,
   mqtt: {
     topicPrefix: 'ring-bridge',
     discoveryPrefix: 'homeassistant',
@@ -150,6 +163,14 @@ export function loadConfig(path: string): BridgeConfig {
   if (typeof parsed.webPort === 'number') config.webPort = parsed.webPort
   if (typeof parsed.webBind === 'string') config.webBind = parsed.webBind
   if (typeof parsed.webToken === 'string') config.webToken = parsed.webToken
+  if (typeof parsed.tlsCert === 'string') config.tlsCert = parsed.tlsCert
+  if (typeof parsed.tlsKey === 'string') config.tlsKey = parsed.tlsKey
+  if (typeof parsed.publicSnapshots === 'boolean') {
+    config.publicSnapshots = parsed.publicSnapshots
+  }
+  if (typeof parsed.cameraRefreshSec === 'number') {
+    config.cameraRefreshSec = parsed.cameraRefreshSec
+  }
   if (typeof parsed.logFile === 'string') config.logFile = parsed.logFile
   if (typeof parsed.webhookUrl === 'string') config.webhookUrl = parsed.webhookUrl
 

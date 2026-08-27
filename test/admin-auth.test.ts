@@ -15,6 +15,7 @@ const status: BridgeStatus = {
   events: { lastRefreshAt: 0, count: 0 },
   mqtt: { enabled: false, connected: false },
   auth: { state: 'ok' },
+  cameraChanges: { added: [], removed: 0 },
 }
 
 const context: AdminContext = {

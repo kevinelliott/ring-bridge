@@ -43,6 +43,9 @@ Run options:
   --web-bind <addr>  Dashboard bind address
   --web-token <s>    Require a token for the dashboard
   --no-web           Disable the dashboard
+  --tls-cert <path>  Serve the dashboard over HTTPS (with --tls-key)
+  --tls-key <path>   Private key for --tls-cert
+  --public-snapshots Serve /snapshot/<camera>.jpg without the admin token
 
 Test options:
   -n, --seconds <n>  Capture length (default 10)
@@ -118,6 +121,9 @@ function parse(argv: string[]): ParsedArgs {
       case '--web-bind': o.webBind = next(); break
       case '--web-token': o.webToken = next(); break
       case '--no-web': o.noWeb = true; break
+      case '--tls-cert': o.tlsCert = next(); break
+      case '--tls-key': o.tlsKey = next(); break
+      case '--public-snapshots': o.publicSnapshots = true; break
       case '--json': out.json = true; break
       case '-n': case '--seconds': out.testSeconds = Number(next()); break
       case '--keep': out.testKeep = next(); break

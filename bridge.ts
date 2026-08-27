@@ -49,6 +49,9 @@ export interface CliOverrides extends Partial<CameraSettings> {
   webBind?: string
   webToken?: string
   noWeb?: boolean
+  tlsCert?: string
+  tlsKey?: string
+  publicSnapshots?: boolean
   cameraFilter?: string[]
 }
 
@@ -293,14 +296,62 @@ export async function runBridge(options: RunOptions): Promise<void> {
   })
 
   const startedAt = Date.now()
+  const cameraChanges: { added: string[]; removed: number } = { added: [], removed: 0 }
   let stopping = false
   const shouldStop = (): boolean => stopping
+
+  /**
+   * Notice cameras added or removed in the Ring app.
+   *
+   * The camera list was read once at boot, so a new doorbell needed a restart.
+   * Adding one live would mean binding new RTSP paths and starting encoders
+   * mid-flight, so this only detects the change and says so -- the operator
+   * restarts when it suits them. Honest and cheap beats clever and fragile
+   * for something that happens once a year.
+   */
+  let knownCameraIds = new Set(allCameras.map((camera) => camera.id))
+  const cameraWatch = setInterval(() => {
+    void (async () => {
+      try {
+        // A fresh RingApi avoids the cached locations promise on the live one.
+        const probe = new RingApi({ refreshToken: loadRefreshToken() })
+        const found = (await probe.getLocations()).flatMap((l) => l.cameras)
+        probe.disconnect()
+
+        const currentIds = new Set(found.map((camera) => camera.id))
+        const added = found.filter((camera) => !knownCameraIds.has(camera.id))
+        const removed = [...knownCameraIds].filter((id) => !currentIds.has(id))
+
+        if (added.length > 0) {
+          console.warn(
+            `[cameras] new in Ring: ${added.map((c) => c.name).join(', ')} — ` +
+              'restart the bridge to serve them',
+          )
+        }
+        if (removed.length > 0) {
+          console.warn(
+            `[cameras] ${removed.length} camera(s) no longer in your Ring account — ` +
+              'restart the bridge to stop serving them',
+          )
+        }
+        if (added.length > 0 || removed.length > 0) {
+          cameraChanges.added = added.map((c) => c.name)
+          cameraChanges.removed = removed.length
+          knownCameraIds = currentIds
+        }
+      } catch (error) {
+        noteAuthFailure(error)
+      }
+    })()
+  }, Math.max(60, config.cameraRefreshSec) * 1000)
+  cameraWatch.unref()
 
   const admin = config.webPort > 0
     ? await startAdmin({
         config, configPath: options.configPath, runtimes, server,
         eventCollector, startedAt, mqtt,
         authState: () => ({ ...auth }),
+        cameraChanges: () => ({ ...cameraChanges }),
         onReauthenticated: (restart) => {
           auth.state = 'ok'
           auth.detail = undefined
@@ -326,6 +377,7 @@ export async function runBridge(options: RunOptions): Promise<void> {
       }
       console.log(`\nReceived ${signal}, shutting down...`)
       stopping = true
+      clearInterval(cameraWatch)
       for (const runtime of runtimes) {
         runtime.publisher.stop()
       }
@@ -360,6 +412,9 @@ function applyOverrides(config: BridgeConfig, o: CliOverrides): void {
   if (o.webBind !== undefined) config.webBind = o.webBind
   if (o.webToken !== undefined) config.webToken = o.webToken
   if (o.noWeb) config.webPort = 0
+  if (o.tlsCert !== undefined) config.tlsCert = o.tlsCert
+  if (o.tlsKey !== undefined) config.tlsKey = o.tlsKey
+  if (o.publicSnapshots) config.publicSnapshots = true
 
   // Encoder overrides land on defaults, so they apply to every camera unless a
   // per-camera entry in the config file says otherwise.
@@ -521,6 +576,7 @@ async function startAdmin(deps: {
   startedAt: number
   mqtt: MqttBridge
   authState: () => { state: 'ok' | 'stale'; detail?: string }
+  cameraChanges: () => { added: string[]; removed: number }
   onReauthenticated: (restart: boolean) => void
 }): Promise<AdminServer> {
   const { config, configPath, runtimes, server, eventCollector, startedAt } = deps
@@ -564,6 +620,7 @@ async function startAdmin(deps: {
           events: eventCollector.status,
           mqtt: deps.mqtt.status,
           auth: deps.authState(),
+          cameraChanges: deps.cameraChanges(),
         }
       },
       getConfig: () => config,
@@ -643,13 +700,24 @@ async function startAdmin(deps: {
       onReauthenticated: deps.onReauthenticated,
     },
     config.webToken,
+    {
+      tlsCert: config.tlsCert,
+      tlsKey: config.tlsKey,
+      publicSnapshots: config.publicSnapshots,
+    },
   )
 
   await admin.listen(config.webPort, config.webBind)
+  const scheme = admin.secure ? 'https' : 'http'
   console.log(
-    `Admin dashboard on http://${config.webBind}:${config.webPort}` +
+    `Admin dashboard on ${scheme}://${config.webBind}:${config.webPort}` +
       (config.webToken ? ' (token required)' : ''),
   )
+  if (config.publicSnapshots) {
+    console.log(
+      `Public snapshots at ${scheme}://${config.webBind}:${config.webPort}/snapshot/<camera>.jpg`,
+    )
+  }
   if (!config.webToken && config.webBind !== '127.0.0.1' && config.webBind !== 'localhost') {
     console.warn(
       '[admin] WARNING: dashboard is reachable on the network with no token. ' +
