@@ -20,6 +20,28 @@ datagrams and a single loss costs the whole frame. Every recipe below asks for T
 reachable, an NVR that connects first gets the placeholder rather than a refused
 connection.
 
+## ONVIF discovery
+
+Some NVRs prefer to find cameras rather than be told about them. Enable ONVIF and the
+bridge answers discovery probes and advertises a profile per stream:
+
+```sh
+ring-bridge run --onvif-port 8081 --public-snapshots
+```
+
+Each camera appears as two profiles when a substream is configured — `<camera>_main` and
+`<camera>_sub` — with the right resolution and frame rate on each. `--public-snapshots`
+is what lets the bridge advertise a still-image URL alongside the stream; without it the
+snapshot URI comes back empty and most NVRs cope, but some complain.
+
+Discovery uses UDP multicast on `239.255.255.250:3702`, which needs the bridge on the
+same layer-2 network as the NVR. In Docker that means `network_mode: host` — with bridge
+networking the SOAP services still work, but nothing will discover them, so add the
+device by address.
+
+This is a deliberately partial implementation: discovery, device information, profiles,
+stream and snapshot URIs. No PTZ, events, imaging, or authentication.
+
 ---
 
 ## Frigate
@@ -107,6 +129,13 @@ get Ring cameras into Apple Home.
 
 ## Blue Iris
 
+**With ONVIF** (run the bridge with `--onvif-port 8081`):
+
+1. **Add new camera → Find/Inspect**, and Blue Iris should discover the bridge.
+2. Accept the discovered profiles; the substream is offered as a second profile.
+
+**By hand**, which is equally fine:
+
 1. **Add new camera**, give it a short name.
 2. **Video → Network IP**, then set **Media/video path** using the *Custom / RTSP* make:
 
@@ -117,8 +146,7 @@ Path:      /front_door
 Protocol:  RTSP over TCP
 ```
 
-3. Untick **Get ONVIF/PTZ settings** — the bridge serves RTSP only, with no ONVIF
-   service to discover.
+3. Untick **Get ONVIF/PTZ settings** unless you enabled `--onvif-port`.
 4. If you configured a substream, set it as the **sub-stream** path (`/front_door_sub`)
    so Blue Iris decodes the small stream for motion detection.
 
@@ -154,8 +182,15 @@ the **Buffers** tab, an Image Buffer Size of 50–100 is usually enough at 20fps
 
 ## Synology Surveillance Station
 
-Surveillance Station only accepts cameras it recognises, so add it as a generic ONVIF/RTSP
-device:
+**With ONVIF** (run the bridge with `--onvif-port 8081 --public-snapshots`):
+
+1. **Surveillance Station → IP Camera → Add → Quick Setup**, and the bridge should be
+   discovered on the local network.
+2. If discovery finds nothing — common when Surveillance Station is on a different
+   VLAN, since discovery is multicast — use **Add → Manual** with brand **ONVIF** and
+   the bridge's address and ONVIF port.
+
+**Without ONVIF**, add it as a generic RTSP device:
 
 1. **Surveillance Station → IP Camera → Add → Manual**
 2. Brand: **[User Define]**

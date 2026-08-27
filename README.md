@@ -124,7 +124,7 @@ ffplay -rtsp_transport tcp rtsp://localhost:8554/front_door
 | `ring-bridge login` | Log in to Ring and save a refresh token to `.env` |
 | `ring-bridge run` | Run the bridge (the default if you give no command) |
 | `ring-bridge list [--json]` | List locations and cameras |
-| `ring-bridge test [name]` | Dial one camera and report exactly what Ring sends |
+| `ring-bridge test [name]` | Dial one camera and report exactly what Ring sends (`-n` seconds, `--keep <path>` to save the clip) |
 | `ring-bridge doctor` | Check ffmpeg, ports, token, encoder, and CPU headroom |
 | `ring-bridge encoders` | Show the best available video encoder |
 
@@ -344,6 +344,19 @@ ring-bridge run --tls-cert /path/cert.pem --tls-key /path/key.pem
 That matters mainly because the dashboard's Ring sign-in form carries a password. A
 reverse proxy in front works equally well.
 
+### ONVIF discovery
+
+NVRs that discover cameras rather than accepting a URL — Synology Surveillance Station,
+Blue Iris — can find the bridge if you enable ONVIF:
+
+```sh
+ring-bridge run --onvif-port 8081 --public-snapshots
+```
+
+Each camera is advertised as a profile, with a second profile for its substream.
+Discovery is multicast, so the bridge must share a network with the NVR;
+[docs/nvr-recipes.md](docs/nvr-recipes.md) has the details and the manual fallback.
+
 ### Still images
 
 Some NVRs and integrations want a snapshot URL rather than a stream:
@@ -377,8 +390,16 @@ npm run bridge -- [options]
 | `--no-audio` | — | Publish video only |
 | `--web-port <n>` | `8080` | Dashboard port |
 | `--web-bind <addr>` | `0.0.0.0` | Dashboard bind address |
-| `--web-token <s>` | — | Require a token for config changes |
+| `--web-token <s>` | — | Require a token for the dashboard |
 | `--no-web` | — | Disable the dashboard |
+| `--tls-cert <path>` | — | Serve the dashboard over HTTPS (with `--tls-key`) |
+| `--tls-key <path>` | — | Private key for `--tls-cert` |
+| `--public-snapshots` | off | Serve `/snapshot/<camera>.jpg` without the admin token |
+| `--onvif-port <n>` | off | Enable ONVIF discovery on this port |
+| `--always-on` | — | Keep Ring connected even with no clients |
+| `--no-on-demand` | — | Same as `--always-on` |
+| `--idle-timeout <s>` | `30` | Seconds to hold Ring after the last client leaves |
+| `--config <path>` | `./ring-bridge.config.json` | Config file |
 
 ### Running it as a service
 
