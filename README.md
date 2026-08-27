@@ -553,6 +553,23 @@ client joining mid-GOP decodes immediately.
 | `log-bus.ts` | Console capture for the dashboard |
 | `ring.ts` | Standalone camera lister |
 
+## Releasing
+
+```sh
+npm version patch      # or minor / major
+git push --follow-tags
+```
+
+Tagging `v*` runs the checks, cuts a GitHub release, and publishes to npm if an
+`NPM_TOKEN` repository secret is set. To publish by hand instead:
+
+```sh
+npm login
+npm publish --access public
+```
+
+`prepack` builds first either way, so a stale `dist/` cannot be published.
+
 ## Development
 
 ```sh
