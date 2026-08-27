@@ -210,6 +210,42 @@ LAN that is usually fine, but if it is not:
 The login endpoints always require the admin token as a header, so they are never
 reachable by a cross-site request even when a browser has a session cookie.
 
+## Push notifications and your phone
+
+**If the Ring app and chime stopped announcing events while the bridge was running, this
+is why — and it is fixed by default now.**
+
+`ring-client-api` registers a Firebase push receiver as a side effect of listing
+locations, using the Ring *Android app's* credentials, then attaches the token to your
+account's device record. Ring
+[limits how many devices may be registered for push](https://github.com/dgreif/ring/wiki/Notification-Troubleshooting),
+so adding another one can displace an existing registration — and the casualty can be
+your phone or your chime.
+
+The bridge therefore **does not register for push by default.** Streaming is completely
+unaffected: video, audio, and reconnects all work without it. Only *live* event delivery
+changes — the dashboard, MQTT, and webhooks are fed by polling Ring's event history
+(`eventPollSec`, default 60s) instead of arriving instantly.
+
+If you would rather have instant events and do not rely on the phone app:
+
+```sh
+ring-bridge run --push-notifications
+```
+
+### Recovering notifications
+
+Disabling push here stops the bridge *taking* a registration, but it does not undo one
+already made — Ring keeps the device record, and disconnecting does not remove it. To
+clean up:
+
+1. Ring app → **Control Center → Authorized Client Devices**
+2. Delete the entries named `ring-client-api` (they appear as Android devices)
+3. Sign out and back in on your phone if notifications do not return
+
+While you are there, removing other stale entries is worth doing; a crowded device list
+is what makes the limit bite.
+
 ## On-demand connections
 
 By default a camera is dialed **only while something is watching** — an RTSP client, or a
@@ -260,6 +296,8 @@ CLI flags override the file for that run only, and are never written back.
     "topicPrefix": "ring-bridge",
     "discoveryPrefix": "homeassistant"
   },
+  "pushNotifications": false,
+  "eventPollSec": 60,
   "defaults": {
     "width": 1920, "height": 1080, "fps": 20,
     "encoder": "libx264", "crf": 21, "preset": "veryfast",
@@ -396,6 +434,7 @@ npm run bridge -- [options]
 | `--tls-key <path>` | — | Private key for `--tls-cert` |
 | `--public-snapshots` | off | Serve `/snapshot/<camera>.jpg` without the admin token |
 | `--onvif-port <n>` | off | Enable ONVIF discovery on this port |
+| `--push-notifications` | off | Register for Ring push; can displace your phone's registration |
 | `--always-on` | — | Keep Ring connected even with no clients |
 | `--no-on-demand` | — | Same as `--always-on` |
 | `--idle-timeout <s>` | `30` | Seconds to hold Ring after the last client leaves |

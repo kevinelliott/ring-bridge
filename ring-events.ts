@@ -42,6 +42,12 @@ export class RingEventCollector {
   private readonly cameras: RingCamera[]
   private lastRefreshAt = 0
   private refreshError?: string
+  /**
+   * Suppresses notifications during the first history fetch. Backfill is
+   * catching up on what already happened, not news -- announcing fifty old
+   * events over MQTT at every startup would be worse than useless.
+   */
+  private backfilled = false
 
   constructor(cameras: RingCamera[]) {
     this.cameras = cameras
@@ -103,6 +109,8 @@ export class RingEventCollector {
       }),
     )
 
+    this.backfilled = true
+
     const failure = results.find((r) => r.status === 'rejected')
     this.refreshError =
       failure && failure.status === 'rejected'
@@ -128,7 +136,11 @@ export class RingEventCollector {
       }
     }
 
-    if (event.source === 'push') {
+    // Anything genuinely new is worth announcing, whether it arrived by push
+    // or was found by polling history. Without this, MQTT and webhooks would
+    // go silent whenever push registration is disabled.
+    const isNew = existing === undefined
+    if (isNew && (event.source === 'push' || this.backfilled)) {
       for (const listener of this.listeners) {
         listener(event)
       }

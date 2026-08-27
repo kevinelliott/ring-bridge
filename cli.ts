@@ -47,6 +47,9 @@ Run options:
   --tls-key <path>   Private key for --tls-cert
   --public-snapshots Serve /snapshot/<camera>.jpg without the admin token
   --onvif-port <n>   Enable ONVIF discovery on this port (0 disables)
+  --push-notifications
+                     Register for Ring push. Instant events, but Ring's device
+                     limit means this can stop your phone and chime alerting.
 
 Test options:
   -n, --seconds <n>  Capture length (default 10)
@@ -126,6 +129,7 @@ function parse(argv: string[]): ParsedArgs {
       case '--tls-key': o.tlsKey = next(); break
       case '--public-snapshots': o.publicSnapshots = true; break
       case '--onvif-port': o.onvifPort = Number(next()); break
+      case '--push-notifications': o.pushNotifications = true; break
       case '--json': out.json = true; break
       case '-n': case '--seconds': out.testSeconds = Number(next()); break
       case '--keep': out.testKeep = next(); break

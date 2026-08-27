@@ -242,6 +242,10 @@ within a few seconds — check the dashboard's Ring row, or the logs, for why no
 
 **Video stutters or breaks up.** Almost always UDP on a lossy link. Force TCP.
 
+**My phone stopped getting Ring notifications.** The bridge no longer registers for push
+by default, but if it did previously, remove the `ring-client-api` entries under Ring
+Control Center → Authorized Client Devices. See the README section on push notifications.
+
 **The NVR reports no audio.** Either the camera is running with `--no-audio`, or the
 substream is in use — substreams are video only. Point the audio role at the main stream.
 

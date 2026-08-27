@@ -26,6 +26,7 @@ import { DemandTracker } from './demand.ts'
 import { MqttBridge } from './mqtt-bridge.ts'
 import { WebhookSender } from './webhooks.ts'
 import { OnvifService } from './onvif.ts'
+import { suppressPushRegistration } from './ring-push.ts'
 import {
   loadConfig, saveConfig, settingsFor, validateSettings, validateSubstream,
   type BridgeConfig, type CameraSettings,
@@ -54,6 +55,7 @@ export interface CliOverrides extends Partial<CameraSettings> {
   tlsKey?: string
   publicSnapshots?: boolean
   onvifPort?: number
+  pushNotifications?: boolean
   cameraFilter?: string[]
 }
 
@@ -123,6 +125,22 @@ export async function runBridge(options: RunOptions): Promise<void> {
 
   const ringApi = new RingApi({ refreshToken: loadRefreshToken() })
   const stopPersistingToken = persistRefreshTokenUpdates(ringApi)
+
+  // Must happen before the first getLocations(), which is what registers push.
+  if (!config.pushNotifications) {
+    suppressPushRegistration(ringApi)
+    console.log(
+      '[push] not registering for Ring push notifications, so the phone app ' +
+        'and chime keep theirs. Events are polled instead; set ' +
+        '"pushNotifications": true to make them instant.',
+    )
+  } else {
+    console.warn(
+      '[push] registering for Ring push notifications. Ring limits how many ' +
+        'devices may be registered, so this can stop your phone app and chime ' +
+        'announcing events.',
+    )
+  }
 
   /**
    * Ring rejecting the stored token is a distinct failure from a camera being
@@ -314,6 +332,15 @@ export async function runBridge(options: RunOptions): Promise<void> {
   eventCollector.start()
   void eventCollector.refresh().catch(() => {})
 
+  // Without push, events arrive only when history is fetched, so poll. This is
+  // what keeps MQTT and webhooks working -- with a delay rather than instantly.
+  const eventPoll = config.pushNotifications
+    ? undefined
+    : setInterval(() => {
+        void eventCollector.refresh().catch(() => {})
+      }, Math.max(15, config.eventPollSec) * 1000)
+  eventPoll?.unref()
+
   const webhooks = new WebhookSender(config.webhookUrl)
   const mqtt = new MqttBridge(config.mqtt, cameras.map((c) => c.name))
   await mqtt.start()
@@ -341,10 +368,14 @@ export async function runBridge(options: RunOptions): Promise<void> {
   const cameraWatch = setInterval(() => {
     void (async () => {
       try {
-        // A fresh RingApi avoids the cached locations promise on the live one.
-        const probe = new RingApi({ refreshToken: loadRefreshToken() })
-        const found = (await probe.getLocations()).flatMap((l) => l.cameras)
-        probe.disconnect()
+        // fetchRingDevices is a plain REST call. getLocations() would rebuild
+        // the location graph and re-register a push receiver on every poll,
+        // which is exactly the thing that displaces the phone's registration.
+        const devices = await ringApi.fetchRingDevices()
+        const found = [
+          ...devices.allCameras,
+          ...devices.authorizedDoorbots,
+        ]
 
         const currentIds = new Set(found.map((camera) => camera.id))
         const added = found.filter((camera) => !knownCameraIds.has(camera.id))
@@ -352,7 +383,7 @@ export async function runBridge(options: RunOptions): Promise<void> {
 
         if (added.length > 0) {
           console.warn(
-            `[cameras] new in Ring: ${added.map((c) => c.name).join(', ')} — ` +
+            `[cameras] new in Ring: ${added.map((c) => c.description).join(', ')} — ` +
               'restart the bridge to serve them',
           )
         }
@@ -363,7 +394,7 @@ export async function runBridge(options: RunOptions): Promise<void> {
           )
         }
         if (added.length > 0 || removed.length > 0) {
-          cameraChanges.added = added.map((c) => c.name)
+          cameraChanges.added = added.map((c) => c.description)
           cameraChanges.removed = removed.length
           knownCameraIds = currentIds
         }
@@ -406,6 +437,7 @@ export async function runBridge(options: RunOptions): Promise<void> {
       console.log(`\nReceived ${signal}, shutting down...`)
       stopping = true
       clearInterval(cameraWatch)
+      if (eventPoll) clearInterval(eventPoll)
       for (const runtime of runtimes) {
         runtime.publisher.stop()
       }
@@ -446,6 +478,7 @@ function applyOverrides(config: BridgeConfig, o: CliOverrides): void {
   if (o.tlsKey !== undefined) config.tlsKey = o.tlsKey
   if (o.publicSnapshots) config.publicSnapshots = true
   if (o.onvifPort !== undefined) config.onvifPort = o.onvifPort
+  if (o.pushNotifications) config.pushNotifications = true
 
   // Encoder overrides land on defaults, so they apply to every camera unless a
   // per-camera entry in the config file says otherwise.

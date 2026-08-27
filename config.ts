@@ -84,6 +84,17 @@ export interface BridgeConfig {
    * find the bridge. 0 disables it.
    */
   onvifPort: number
+  /**
+   * Register this bridge for Ring push notifications.
+   *
+   * Off by default: Ring limits how many devices can be push-registered, so
+   * adding one can stop the phone app and chime announcing events. Streaming
+   * is unaffected either way; turning this on only makes dashboard, MQTT and
+   * webhook events instant rather than polled.
+   */
+  pushNotifications: boolean
+  /** How often to poll Ring's event history when push is off. */
+  eventPollSec: number
   logFile?: string
   webhookUrl?: string
   mqtt: MqttConfig
@@ -99,6 +110,8 @@ export const BUILT_IN_DEFAULTS: BridgeConfig = {
   publicSnapshots: false,
   cameraRefreshSec: 900,
   onvifPort: 0,
+  pushNotifications: false,
+  eventPollSec: 60,
   mqtt: {
     topicPrefix: 'ring-bridge',
     discoveryPrefix: 'homeassistant',
@@ -178,6 +191,12 @@ export function loadConfig(path: string): BridgeConfig {
     config.cameraRefreshSec = parsed.cameraRefreshSec
   }
   if (typeof parsed.onvifPort === 'number') config.onvifPort = parsed.onvifPort
+  if (typeof parsed.pushNotifications === 'boolean') {
+    config.pushNotifications = parsed.pushNotifications
+  }
+  if (typeof parsed.eventPollSec === 'number') {
+    config.eventPollSec = parsed.eventPollSec
+  }
   if (typeof parsed.logFile === 'string') config.logFile = parsed.logFile
   if (typeof parsed.webhookUrl === 'string') config.webhookUrl = parsed.webhookUrl
 
