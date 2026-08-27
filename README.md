@@ -335,7 +335,26 @@ additionally require the token as an `X-Admin-Token` header, which a cross-site 
 cannot forge. The token is never accepted from the query string, since URLs end up in
 server logs and browser history.
 
-There is no TLS. Put it behind a reverse proxy if it needs to leave your LAN.
+For HTTPS, point it at a certificate:
+
+```sh
+ring-bridge run --tls-cert /path/cert.pem --tls-key /path/key.pem
+```
+
+That matters mainly because the dashboard's Ring sign-in form carries a password. A
+reverse proxy in front works equally well.
+
+### Still images
+
+Some NVRs and integrations want a snapshot URL rather than a stream:
+
+```sh
+ring-bridge run --public-snapshots
+# http://<bridge-host>:8080/snapshot/front_door.jpg
+```
+
+This endpoint sits deliberately outside the admin token, which is why it is off by
+default — anyone who can reach the port can fetch a current camera image.
 
 ## Configuration
 
@@ -505,24 +524,34 @@ stderr.
 - Every reconnect appears in your Ring event history as an `on_demand` event.
 - Audio is resampled to 16 kHz mono AAC, which is what Frigate's audio detection expects.
 
-## Known advisory: `ip` (GHSA-2p57-rm9w-gvfp)
+## The `ip` advisory (GHSA-2p57-rm9w-gvfp)
 
-`npm audit` reports a high-severity SSRF advisory against the `ip` package. It arrives
-transitively as `ring-client-api → werift → ip`, and there is no patched version — the
-package is unmaintained, and the only `npm audit fix` is a downgrade to
-`ring-client-api@9.13.0`, which is a breaking change.
+**Resolved.** `npm audit` used to report a high-severity SSRF advisory against the `ip`
+package, reached transitively as `ring-client-api → werift → ip`.
 
-The advisory is specifically about `ip.isPublic()` misclassifying addresses. That
-function is never called anywhere in this dependency tree; werift uses only
-`ip.toString`, `ip.toBuffer`, `ip.isV4Format` and `ip.isLoopback`, for STUN attribute
-encoding and ICE candidate handling. Verify it yourself:
+werift 0.24.4 dropped the dependency entirely, but `ring-client-api` still pins werift to
+`0.22.4`, so the fix does not arrive on its own. This project therefore carries an
+override:
 
-```sh
-grep -rn "\.isPublic(" node_modules/werift node_modules/ring-client-api   # no hits
+```json
+"overrides": { "werift": "0.24.4" }
 ```
 
-So the alert stays open until upstream drops the dependency, but the vulnerable code path
-is not reachable from here.
+`npm audit` now reports zero vulnerabilities and `ip` is not in the tree at all.
+
+Two things worth knowing if you are evaluating this:
+
+- The advisory was never reachable here even before the override. It concerns
+  `ip.isPublic()`, which is not called anywhere in this dependency tree — werift used
+  only `toString`, `toBuffer`, `isV4Format` and `isLoopback`, for STUN attribute encoding
+  and ICE candidates.
+- The override moves the WebRTC stack two minor versions ahead of what
+  `ring-client-api` pins. It was verified against live cameras — video, audio, and
+  reconnects across a Ring session timeout — but that is one network and two camera
+  models. If you see streaming problems, drop the `overrides` block and reinstall; the
+  advisory returns but remains unreachable.
+
+The durable fix is upstream in `ring-client-api`.
 
 ## How it works
 
@@ -569,6 +598,11 @@ npm publish --access public
 ```
 
 `prepack` builds first either way, so a stale `dist/` cannot be published.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). NVR recipes are the most useful contribution —
+there is an issue template for them.
 
 ## Development
 

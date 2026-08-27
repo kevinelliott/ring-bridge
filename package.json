@@ -51,5 +51,8 @@
     "webrtc",
     "ffmpeg",
     "mqtt"
-  ]
+  ],
+  "overrides": {
+    "werift": "0.24.4"
+  }
 }
