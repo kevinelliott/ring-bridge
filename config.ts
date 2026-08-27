@@ -240,6 +240,33 @@ export function parseSize(value: string): { width: number; height: number } {
 }
 
 /** Validate settings the same way regardless of whether CLI or UI set them. */
+export function validateSubstream(
+  sub: Partial<SubstreamSettings> | null | undefined,
+): string | undefined {
+  if (sub === null || sub === undefined) {
+    return undefined
+  }
+  if (sub.width === undefined || sub.height === undefined) {
+    return 'a substream needs both width and height'
+  }
+  if (sub.width % 2 !== 0 || sub.height % 2 !== 0) {
+    return 'substream width and height must both be even'
+  }
+  if (sub.width < 160 || sub.height < 120) {
+    return 'substream must be at least 160x120'
+  }
+  if (sub.fps !== undefined && (!Number.isFinite(sub.fps) || sub.fps < 1 || sub.fps > 60)) {
+    return 'substream fps must be between 1 and 60'
+  }
+  if (
+    sub.crf !== undefined &&
+    (!Number.isInteger(sub.crf) || sub.crf < 0 || sub.crf > 51)
+  ) {
+    return 'substream crf must be an integer between 0 and 51'
+  }
+  return undefined
+}
+
 export function validateSettings(s: Partial<CameraSettings>): string | undefined {
   if (s.fps !== undefined && (!Number.isFinite(s.fps) || s.fps < 1 || s.fps > 60)) {
     return 'fps must be between 1 and 60'

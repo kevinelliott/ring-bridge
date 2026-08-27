@@ -121,6 +121,8 @@
 </nav>
 
 <main>
+  <div class="note" id="camBanner" style="display:none; max-width:640px"></div>
+
   <div class="note" id="authBanner" style="display:none; border-left-color: var(--err); max-width:640px">
     <strong style="color:var(--err)">Ring rejected the stored refresh token.</strong>
     <div id="authDetail" style="margin:6px 0"></div>
@@ -217,6 +219,15 @@
         <label class="check"><input type="checkbox" id="cfgAlwaysOn"> keep connected with no clients</label>
       </div>
       <div class="row"><label>Idle timeout (s)</label><input id="cfgIdle" type="number" min="0"></div>
+      <div class="row">
+        <label>Substream</label>
+        <label class="check"><input type="checkbox" id="cfgSubOn"> publish a low-resolution copy</label>
+      </div>
+      <div id="subFields" style="display:none">
+        <div class="row"><label>Substream size</label><input id="cfgSubSize" placeholder="640x360"></div>
+        <div class="row"><label>Substream fps</label><input id="cfgSubFps" type="number" min="1" max="60"></div>
+        <div class="row"><label>Substream CRF</label><input id="cfgSubCrf" type="number" min="0" max="51"></div>
+      </div>
       <p class="hint">
         Changes are written to the config file and survive a restart. The encoder restarts,
         but the RTSP session survives it — connected clients keep their connection because
@@ -381,6 +392,15 @@ function renderStatus(s) {
       : 'Signed in. The refresh token is valid and kept current automatically.';
     $('ringAuthState').style.color = stale ? 'var(--err)' : 'var(--muted)';
   }
+  const ch = s.cameraChanges;
+  if (ch && (ch.added.length || ch.removed)) {
+    const parts = [];
+    if (ch.added.length) parts.push(`new in Ring: ${ch.added.map(esc).join(', ')}`);
+    if (ch.removed) parts.push(`${ch.removed} removed`);
+    $('camBanner').innerHTML =
+      `Your Ring account changed — ${parts.join('; ')}. Restart the bridge to pick it up.`;
+    $('camBanner').style.display = 'block';
+  }
   if (s.mqtt?.enabled) {
     $('mqttPill').style.display = '';
     $('mqttPill').innerHTML =
@@ -490,7 +510,17 @@ function fillConfigForm() {
   $('cfgBitrate').value = c.bitrateKbps ?? '';
   $('cfgAlwaysOn').checked = Boolean(c.alwaysOn);
   $('cfgIdle').value = c.idleTimeoutSec;
+
+  const sub = c.substream;
+  $('cfgSubOn').checked = Boolean(sub);
+  $('subFields').style.display = sub ? '' : 'none';
+  $('cfgSubSize').value = sub ? `${sub.width}x${sub.height}` : '640x360';
+  $('cfgSubFps').value = sub?.fps ?? 5;
+  $('cfgSubCrf').value = sub?.crf ?? 28;
 }
+$('cfgSubOn').onchange = () => {
+  $('subFields').style.display = $('cfgSubOn').checked ? '' : 'none';
+};
 
 async function loadConfig() {
   const d = await (await api('/api/config')).json();
@@ -524,8 +554,23 @@ $('cfgSave').onclick = async () => {
       bitrateKbps: bitrate === '' ? undefined : +bitrate,
       alwaysOn: $('cfgAlwaysOn').checked,
       idleTimeoutSec: +$('cfgIdle').value,
+      substream: null,
     },
   };
+
+  if ($('cfgSubOn').checked) {
+    const sm = /^(\d+)x(\d+)$/.exec($('cfgSubSize').value.trim());
+    if (!sm) {
+      msg.textContent = 'Substream size must look like 640x360';
+      msg.style.color = 'var(--err)';
+      return;
+    }
+    body.patch.substream = {
+      width: +sm[1], height: +sm[2],
+      fps: +$('cfgSubFps').value,
+      crf: +$('cfgSubCrf').value,
+    };
+  }
   msg.textContent = 'Applying…'; msg.style.color = 'var(--muted)';
   const r = await fetch('/api/config', {
     method: 'POST',
@@ -539,6 +584,10 @@ $('cfgSave').onclick = async () => {
   }
   msg.style.color = 'var(--ok)';
   msg.textContent = `Saved to ${d.configPath.split('/').pop()}`;
+  if (d.restartRequired?.length) {
+    msg.style.color = 'var(--warn)';
+    msg.textContent += ` · restart the bridge for: ${d.restartRequired.join(', ')}`;
+  }
   await loadConfig();
 };
 

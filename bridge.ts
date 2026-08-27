@@ -26,7 +26,7 @@ import { DemandTracker } from './demand.ts'
 import { MqttBridge } from './mqtt-bridge.ts'
 import { WebhookSender } from './webhooks.ts'
 import {
-  loadConfig, saveConfig, settingsFor, validateSettings,
+  loadConfig, saveConfig, settingsFor, validateSettings, validateSubstream,
   type BridgeConfig, type CameraSettings,
 } from './config.ts'
 
@@ -625,10 +625,21 @@ async function startAdmin(deps: {
       },
       getConfig: () => config,
       applyConfig: (cameraName, patch) => {
-        const invalid = validateSettings(patch)
+        const invalid = validateSettings(patch) ??
+          ('substream' in patch ? validateSubstream(patch.substream) : undefined)
         if (invalid) {
           return { error: invalid }
         }
+
+        // Adding or removing a substream changes which RTSP paths exist, and
+        // paths are bound at startup. Save it, then say so plainly.
+        const substreamChanged =
+          'substream' in patch &&
+          runtimes.some((r) => {
+            const has = Boolean(r.settings.substream)
+            return (cameraName === null || r.camera.name === cameraName) &&
+              has !== Boolean(patch.substream)
+          })
 
         const target = cameraName
           ? runtimes.filter((r) => r.camera.name === cameraName)
@@ -663,7 +674,13 @@ async function startAdmin(deps: {
         }
 
         saveConfig(configPath, config)
-        return { applied: Object.keys(patch), configPath }
+        return {
+          applied: Object.keys(patch),
+          configPath,
+          ...(substreamChanged
+            ? { restartRequired: ['substream'] }
+            : {}),
+        }
       },
       pinCamera: (path, seconds) => {
         const runtime = bySlug.get(path)

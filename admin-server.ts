@@ -81,6 +81,8 @@ export interface BridgeStatus {
 export interface ApplyResult {
   applied?: string[]
   configPath?: string
+  /** Settings saved to the file that only take effect after a restart. */
+  restartRequired?: string[]
   error?: string
 }
 
