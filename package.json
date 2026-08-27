@@ -4,21 +4,23 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && cp -R public dist/public",
     "start": "tsx --env-file-if-exists=.env cli.ts",
     "bridge": "tsx --env-file-if-exists=.env cli.ts run",
     "list": "tsx --env-file-if-exists=.env cli.ts list",
     "doctor": "tsx --env-file-if-exists=.env cli.ts doctor",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test test/*.test.ts"
+    "test": "tsx --test test/*.test.ts",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "mqtt": "^5.15.2",
-    "ring-client-api": "^14.3.0",
-    "tsx": "^4.23.12"
+    "ring-client-api": "^14.3.0"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "tsx": "^4.23.12"
   },
   "description": "Serve Ring cameras as RTSP for Frigate and other NVRs",
   "license": "MIT",
@@ -27,15 +29,27 @@
     "url": "git+https://github.com/kevinelliott/ring-bridge.git"
   },
   "bin": {
-    "ring-bridge": "./cli.ts"
+    "ring-bridge": "./dist/cli.js"
   },
   "engines": {
     "node": ">=22"
   },
   "files": [
-    "*.ts",
-    "public/",
+    "dist/",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    ".env.example"
+  ],
+  "keywords": [
+    "ring",
+    "ring-doorbell",
+    "rtsp",
+    "frigate",
+    "nvr",
+    "home-assistant",
+    "camera",
+    "webrtc",
+    "ffmpeg",
+    "mqtt"
   ]
 }

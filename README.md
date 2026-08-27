@@ -34,6 +34,18 @@ reconnect. It also runs its own RTSP server, so there is no MediaMTX or go2rtc t
 **1. Install**
 
 ```sh
+npm install -g ring-bridge
+```
+
+Or run it without installing:
+
+```sh
+npx ring-bridge --help
+```
+
+Or from source, if you want to hack on it:
+
+```sh
 git clone https://github.com/kevinelliott/ring-bridge.git
 cd ring-bridge
 npm install
@@ -160,9 +172,13 @@ Notes:
 
 ### Other NVRs
 
-The output is standard RTSP (H.264 + AAC) over TCP or UDP, so anything that accepts an
-RTSP URL should work — Blue Iris, Scrypted, Shinobi, ZoneMinder, go2rtc. Recipes for
-those are coming; open an issue if you get one working and want it documented.
+The output is standard RTSP (H.264 + AAC), so anything that accepts an RTSP URL works.
+**[docs/nvr-recipes.md](docs/nvr-recipes.md)** has copy-paste configuration for:
+
+go2rtc · Home Assistant · Scrypted · Blue Iris · Shinobi · ZoneMinder ·
+Synology Surveillance Station · MediaMTX · VLC and ffplay
+
+Got another one working? Open an issue with the config and it will be added.
 
 ## When the token goes stale
 
@@ -540,9 +556,22 @@ client joining mid-GOP decodes immediately.
 ## Development
 
 ```sh
+npm install
 npm run typecheck
 npm test
+npm run build      # compile to dist/, which is what gets published
 ```
+
+From a source checkout the commands run through `tsx`:
+
+```sh
+npm run bridge -- --port 8554
+npm run list
+```
+
+Files that hold your data — `.env` and `ring-bridge.config.json` — resolve against the
+working directory, not the install location, so a globally installed copy reads whichever
+directory you run it from. `RING_ENV_FILE` overrides where the token is kept.
 
 Tests cover the parts where a silent regression would be expensive: config merging and
 validation, RTP header rewriting across an encoder restart, SPS/PPS sniffing, the

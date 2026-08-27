@@ -39,6 +39,14 @@ jobs:
       - name: Tests
         run: npm test
 
+      # The published artifact is compiled JS, so a broken build is a broken
+      # release. Check it here rather than at publish time.
+      - name: Build
+        run: npm run build
+
+      - name: Built CLI runs on plain node
+        run: node dist/cli.js --help
+
       # Nothing here reaches Ring, so these must work without a token.
       - name: CLI runs without credentials
         run: |

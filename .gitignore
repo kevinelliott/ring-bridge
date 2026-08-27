@@ -4,3 +4,5 @@ node_modules/
 ring-bridge.config.json
 config/
 *.log
+dist/
+*.tgz
