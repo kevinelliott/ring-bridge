@@ -1,7 +1,8 @@
 services:
   ring-bridge:
     image: ghcr.io/kevinelliott/ring-bridge:latest
-    # Or build locally instead:
+    # Published for linux/amd64 and linux/arm64 on every release tag.
+    # To build from a checkout instead, comment out `image:` and use:
     # build: .
     #
     # Host networking keeps RTSP simple: no port juggling for RTP, and NVRs on
